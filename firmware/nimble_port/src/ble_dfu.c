@@ -18,8 +18,8 @@
 
 enum { ST_IDLE, ST_START, ST_INIT, ST_DATA, ST_VALIDATE, ST_VALIDATED };
 enum { OP_START = 1, OP_INIT = 2, OP_RECV_IMG = 3, OP_VALIDATE = 4,
-       OP_ACTIVATE = 5, OP_SYS_RESET = 6, OP_PRN_REQ = 8,
-       OP_RESP = 0x10, OP_PRN = 0x11 };
+       OP_ACTIVATE = 5, OP_SYS_RESET = 6, OP_REPORT = 7,
+       OP_PRN_REQ = 8, OP_RESP = 0x10, OP_PRN = 0x11 };
 
 static const ble_uuid128_t dfu_svc_uuid = BLE_UUID128_INIT(
     0x23, 0xD1, 0xBC, 0xEA, 0x5F, 0x78, 0x23, 0x15,
@@ -218,13 +218,26 @@ static int dfu_control(uint16_t conn, struct os_mbuf *om)
     case OP_PRN_REQ:
         prn_every = op1;
         break;
-    case OP_SYS_RESET:
+    case OP_SYS_RESET: {
         /* buttonless flow: the client asks us to reset "into DFU mode".
-           Our image is an unconfirmed test image, so the bootloader
-           reverts to InfiniTime — which IS the working DFU target —
-           and the client's push continues there. */
+           GPREGRET 0xA8 tells the PineTime MCUBoot to boot the recovery
+           firmware — the BLE DFU target the client then reconnects to.
+           (A plain reset lands in InfiniTime proper, where the client's
+           DFU session dies as "waiting".) */
+        const uint8_t d[3] = {OP_RESP, OP_SYS_RESET, 1};
+        dfu_notify(conn, d, 3);
+        *(volatile uint32_t *)0x4000051C = 0xA8; /* POWER->GPREGRET */
         SCB_AIRCR = 0x05FA0004;
         break;
+    }
+    case OP_REPORT: {
+        const uint8_t d[7] = {OP_RESP, OP_REPORT, 1,
+                              (uint8_t)total_len, (uint8_t)(total_len >> 8),
+                              (uint8_t)(total_len >> 16),
+                              (uint8_t)(total_len >> 24)};
+        dfu_notify(conn, d, 7);
+        break;
+    }
     case OP_RECV_IMG:
         if (dfu_state == ST_INIT) {
             buf_len = total_len = bytes_rx = pkt_count = 0;
@@ -348,14 +361,15 @@ static int diag_read2(struct os_mbuf *om)
     extern int sensors_hrs_ok(void), sensors_bma_ok(void);
     extern int sensors_hrs_raw(void), sensors_hrs_ac(void);
     extern int sensors_hrs_beats(void), sensors_hrs_ibi(void);
+    extern int hal_clock_synced(void);
     int n = snprintf(s, sizeof s,
-        "I%02X%02X%02X M%d H%d.%d r%d a%d b%ui%u S%d.%d D%dC%dP%dN%d",
+        "I%02X%02X%02X M%d H%d.%d r%d a%d b%ui%u S%d.%d t%d D%dC%dP%dN%d",
         touch_diag.scan[0], touch_diag.scan[1], touch_diag.scan[2],
         os_msys_num_free(),
         sensors_hrs_ok(), sensors_bpm(),
         sensors_hrs_raw(), sensors_hrs_ac(), sensors_hrs_beats(),
         sensors_hrs_ibi(),
-        sensors_bma_ok(), sensors_steps(),
+        sensors_bma_ok(), sensors_steps(), hal_clock_synced(),
         dfu_state, d_ctrl_writes, d_pkt_writes, d_notify_rc);
     return diag_put(om, s, n);
 }

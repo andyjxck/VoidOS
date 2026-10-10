@@ -16,13 +16,18 @@ int sensors_bma_z(void);
 int sensors_hrs_ok(void);
 int sensors_steps(void);
 int sensors_bpm(void);
+int hal_clock_hour(void);
+int hal_clock_minute(void);
+void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s);
+void hal_clock_date(int *y, int *mo, int *d, int *dow);
 extern const lv_font_t kenney9, kenney16, kenney24, kenney56;
 
 /* ---- state -------------------------------------------------------------- */
 
 typedef enum {
     SCR_FACE, SCR_LAUNCHER, SCR_CC, SCR_WORKOUT, SCR_W_RUN, SCR_W_DONE,
-    SCR_SLEEP, SCR_S_DONE, SCR_WATER, SCR_CLOCK, SCR_SETTINGS, SCR_STATS
+    SCR_SLEEP, SCR_S_DONE, SCR_WATER, SCR_CLOCK, SCR_SETTINGS, SCR_STATS,
+    SCR_SETTIME
 } scr_t;
 
 static scr_t cur = SCR_FACE;
@@ -355,7 +360,8 @@ static void build_cc(lv_obj_t *r)
         lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 6);
         lv_obj_set_user_data(b, (void *)(intptr_t)i);
     }
-    mk_label_c(r, &kenney9, C_MUTED, 120, 216, "SWIPE DOWN FOR FACE");
+    /* gesture hints removed: the swipe map is learned; bare labels just
+       looked techy */
 }
 
 /* ---- launcher ------------------------------------------------------------- */
@@ -381,7 +387,7 @@ static void build_launcher(lv_obj_t *r)
         lv_obj_set_style_radius(b, 14, 0);
         lv_obj_set_user_data(b, (void *)(intptr_t)scrs[i]);
     }
-    mk_label_c(r, &kenney9, C_MUTED, 120, 218, "SWIPE RIGHT FOR BACK");
+    /* no gesture hint label — keep the panel clean */
 }
 
 /* ---- workout -------------------------------------------------------------- */
@@ -661,27 +667,78 @@ static void build_settings(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "SETTINGS", 1);
-    static const char *rows[9] = {
+    static const char *rows[10] = {
         "DND", "AIRPLANE", "BLUETOOTH", "TORCH", "WATER LOCK",
-        "BRIGHTNESS", "CC: TORCH", "CC: WATER", "CC: PHONE"
+        "BRIGHTNESS", "CC: TORCH", "CC: WATER", "CC: PHONE", "SET TIME"
     };
-    int vals[9] = {dnd_on, airplane_on, 0, torch_on, water_lock,
-                   brightness, !(cc_hide & 1), !(cc_hide & 2), !(cc_hide & 4)};
-    for (int i = 0; i < 9; i++) {
-        int y = 44 + i * 20;
+    int vals[10] = {dnd_on, airplane_on, 0, torch_on, water_lock,
+                    brightness, !(cc_hide & 1), !(cc_hide & 2),
+                    !(cc_hide & 4), 1};
+    for (int i = 0; i < 10; i++) {
+        int y = 42 + i * 19;
         mk_label(r, &kenney9, C_WHITE, 18, y, rows[i]);
         char v[8];
         if (i == 5)
             lv_snprintf(v, sizeof v, "%d%%", brightness);
         else
             lv_snprintf(v, sizeof v, "%s", vals[i] ? "ON" : "OFF");
-        lv_obj_t *b = mk_btn(r, v, 158, y - 6, 64, 22,
+        lv_obj_t *b = mk_btn(r, i == 9 ? ">" : v, 158, y - 6, 64, 22,
                              vals[i] ? C_ACCENT : C_FILL, settings_cb);
         lv_obj_set_style_text_color(lv_obj_get_child(b, 0),
                                     vals[i] ? C_BG : C_MUTED, 0);
         lv_obj_set_user_data(b, (void *)(intptr_t)i);
     }
-    mk_label_c(r, &kenney9, C_MUTED, 120, 224, "HOLD BUTTON 3S = RESET");
+    mk_label_c(r, &kenney9, C_MUTED, 120, 230, "HOLD BUTTON 3S = RESET");
+}
+
+/* manual time set, like the reference watches: +/- on hour/minute,
+   DONE writes it and marks the clock synced */
+static int set_h, set_m;
+
+static void settime_cb(lv_event_t *e)
+{
+    int act = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (act == 0) set_h = (set_h + 23) % 24;
+    if (act == 1) set_h = (set_h + 1) % 24;
+    if (act == 2) set_m = (set_m + 59) % 60;
+    if (act == 3) set_m = (set_m + 1) % 60;
+    if (act == 4) {
+        int y, mo, d, dow;
+        hal_clock_date(&y, &mo, &d, &dow);
+        if (!y) { y = 2025; mo = 1; d = 1; dow = 3; }
+        hal_clock_set(y, mo, d, dow, set_h, set_m, 0);
+        nav_to(SCR_SETTINGS);
+        return;
+    }
+    if (act == 5) {
+        nav_to(SCR_SETTINGS);
+        return;
+    }
+    rebuild();
+}
+
+static void build_settime(lv_obj_t *r)
+{
+    page_bg(r);
+    mk_header(r, "SET TIME", 1);
+    if (!set_h && !set_m) {
+        set_h = hal_clock_hour();
+        set_m = hal_clock_minute();
+    }
+    char buf[8];
+    lv_snprintf(buf, sizeof buf, "%02d:%02d", set_h, set_m);
+    mk_label_c(r, &kenney24, C_WHITE, 120, 96, buf);
+    lv_obj_set_user_data(mk_btn(r, "-", 42, 140, 40, 32, C_FILL, settime_cb),
+                         (void *)(intptr_t)0);
+    lv_obj_set_user_data(mk_btn(r, "+", 88, 140, 40, 32, C_FILL, settime_cb),
+                         (void *)(intptr_t)1);
+    lv_obj_set_user_data(mk_btn(r, "-", 112, 140, 40, 32, C_FILL, settime_cb),
+                         (void *)(intptr_t)2);
+    lv_obj_set_user_data(mk_btn(r, "+", 158, 140, 40, 32, C_FILL, settime_cb),
+                         (void *)(intptr_t)3);
+    lv_obj_set_user_data(mk_btn(r, "DONE", 70, 186, 100, 30, C_ACCENT,
+                                settime_cb), (void *)(intptr_t)4);
+    mk_label_c(r, &kenney9, C_MUTED, 120, 224, "24H · SAVED ON DONE");
 }
 
 static void settings_cb(lv_event_t *e)
@@ -703,6 +760,11 @@ static void settings_cb(lv_event_t *e)
     case 6: cc_hide ^= 1; break;
     case 7: cc_hide ^= 2; break;
     case 8: cc_hide ^= 4; break;
+    case 9:
+        set_h = hal_clock_hour();
+        set_m = hal_clock_minute();
+        nav_to(SCR_SETTIME);
+        return;
     }
     rebuild();
 }
@@ -761,6 +823,7 @@ static void rebuild(void)
     case SCR_CLOCK:     build_clock(root); break;
     case SCR_SETTINGS:  build_settings(root); break;
     case SCR_STATS:     build_stats(root); break;
+    case SCR_SETTIME:   build_settime(root); break;
     }
 }
 
@@ -791,22 +854,32 @@ void ui_tick(void)
     if (!ui_start_ms)
         ui_start_ms = now;   /* first loop iter, after ble_init's boot marks */
     extern int ble_dfu_busy(void);
-    static int sleep_az = 0x4000;      /* sentinel: no baseline yet */
+    static uint32_t sleep_at;
+    static int sleep_az, wake_streak;
     /* idle -> screen off (never mid-DFU) */
     if (!asleep && last_input_ms && now - last_input_ms > SLEEP_AFTER_MS &&
         !ble_dfu_busy()) {
         asleep = 1;
         display_backlight(0);
-        sleep_az = sensors_bma_z();    /* orientation at sleep: raise-to-
-                                          wake watches for a ~40° tilt */
+        sleep_at = now;
+        wake_streak = 0;
     }
-    /* raise-to-wake: a wrist raise rotates the Z axis ~1g (±1024 in
-       12-bit counts). Edge-triggered on the sleep-time baseline so a
-       watch left face-up on a desk doesn't keep waking. */
-    if (asleep && sleep_az != 0x4000) {
-        int dz = sensors_bma_z() - sleep_az;
-        if (dz > 700 || dz < -700)
-            ui_wake();
+    /* raise-to-wake: a real raise ends in a sustained new orientation
+       (~40°+ of Z-axis tilt); momentary wrist jiggle doesn't. Track the
+       baseline for the first second after sleep so it's captured with
+       the watch settled, then require the delta to persist. */
+    if (asleep) {
+        if (now - sleep_at < 1200) {
+            sleep_az = sensors_bma_z();
+        } else {
+            int dz = sensors_bma_z() - sleep_az;
+            if (dz > 700 || dz < -700) {
+                if (++wake_streak > 40)
+                    ui_wake();
+            } else {
+                wake_streak = 0;
+            }
+        }
     }
     /* side button as nav fallback while touch is unreliable: a release
        before the 3 s reset threshold steps through screens */

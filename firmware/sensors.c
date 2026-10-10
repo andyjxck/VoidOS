@@ -5,9 +5,10 @@
    magnitude delta over a gravity baseline (wrist-mounted). The chip's
    built-in step engine (Bosch config blob) is a later upgrade.
    HRS3300: init sequence follows the wasp-os/InfiniTime-derived register
-   values (datasheet); BPM via adaptive-threshold peak detection on the
-   AC component of the optical signal. */
+   values (datasheet); BPM via spectral analysis (DFT peak in the HR
+   band) on the raw optical signal. */
 #include <stdint.h>
+#include <math.h>
 #include "board.h"
 #include "voidos/hal.h"
 
@@ -20,11 +21,17 @@ int i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val);
 /* ---- BMA425 ------------------------------------------------------------ */
 
 static int bma_ok;
+static int bma_engine;          /* feature engine loaded ok */
 static uint32_t steps;
 static int16_t ax, ay, az;
 static int32_t base;            /* gravity baseline, mg */
+static int32_t act_delta;       /* last |mag - base|, for raise-to-wake */
 static int armed = 1;
 static uint32_t last_step_ms;
+
+#include "bma_cfg.h"
+
+int i2c_write_regs(uint8_t addr, uint8_t reg, const uint8_t *src, unsigned n);
 
 static void bma_init(void)
 {
@@ -33,13 +40,37 @@ static void bma_init(void)
     hal_delay_ms(2);
     if (!i2c_read_reg(BMA_ADDR, 0x00, &id, 1) || !id)
         return;                             /* chip id 0x11/0x13/... */
-    i2c_write_reg(BMA_ADDR, 0x7C, 0x00);      /* PWR_CONF: adv power-save off
-                                               so config writes stick */
+    i2c_write_reg(BMA_ADDR, 0x7C, 0x00);      /* adv power-save off */
     hal_delay_ms(1);
-    i2c_write_reg(BMA_ADDR, 0x40, 0xA8);      /* ACC_CONF: CIC, avg4, 100Hz */
-    i2c_write_reg(BMA_ADDR, 0x41, 0x00);      /* ACC_RANGE: ±2g */
+
+    /* Bosch feature engine: stream the config into internal RAM,
+       then start the ASIC so features come alive. Register-level
+       sequence mirrors the published sensor driver. */
+    i2c_write_reg(BMA_ADDR, 0x59, 0x00);      /* INIT_CTRL: halt loader */
+    for (unsigned i = 0; i < BMA_CFG_SIZE; i += 16) {
+        i2c_write_reg(BMA_ADDR, 0x5B, (i / 2) & 0x0F);
+        i2c_write_reg(BMA_ADDR, 0x5C, (i / 2) >> 4);
+        unsigned n = BMA_CFG_SIZE - i < 16 ? BMA_CFG_SIZE - i : 16;
+        i2c_write_regs(BMA_ADDR, 0x5E, bma_cfg + i, n);
+    }
+    i2c_write_reg(BMA_ADDR, 0x59, 0x01);      /* start the ASIC */
+    hal_delay_ms(150);
+    uint8_t stat = 0;
+    i2c_read_reg(BMA_ADDR, 0x2A, &stat, 1);   /* INTERNAL_STAT */
+    if ((stat & 0x0F) == 0x01) {              /* ASIC_INITIALIZED */
+        /* enable the on-chip step counter: feature byte 0x3B bit4 */
+        uint8_t feat[70];
+        if (i2c_read_reg(BMA_ADDR, 0x5E, feat, 70)) {
+            feat[0x3B] |= 0x10;
+            if (i2c_write_regs(BMA_ADDR, 0x5E, feat, 70))
+                bma_engine = 1;
+        }
+    }
+
+    i2c_write_reg(BMA_ADDR, 0x40, 0xA8);      /* CIC, avg4, 100Hz */
+    i2c_write_reg(BMA_ADDR, 0x41, 0x00);      /* ±2g */
     hal_delay_ms(1);
-    i2c_write_reg(BMA_ADDR, 0x7D, 0x04);      /* PWR_CTRL: accel on */
+    i2c_write_reg(BMA_ADDR, 0x7D, 0x04);      /* accel on */
     hal_delay_ms(50);
     bma_ok = 1;
 }
@@ -78,9 +109,18 @@ static void bma_sample(uint32_t now)
         base = mag;
     base += (mag - base) >> 5;
     int32_t delta = mag - base;
+    act_delta = delta < 0 ? -delta : delta;
     if (delta < 60)
         armed = 1;
-    if (armed && delta > 220 && now - last_step_ms > 300) {
+
+    if (bma_engine) {
+        /* the chip's own step algorithm — Bosch feature engine */
+        uint8_t s[4];
+        if (i2c_read_reg(BMA_ADDR, 0x1E, s, 4))
+            steps = (uint32_t)s[0] | ((uint32_t)s[1] << 8) |
+                    ((uint32_t)s[2] << 16) | ((uint32_t)s[3] << 24);
+    } else if (armed && delta > 220 && now - last_step_ms > 300) {
+        /* fallback: crude magnitude-delta counter */
         steps++;
         armed = 0;
         last_step_ms = now;
@@ -92,13 +132,8 @@ static void bma_sample(uint32_t now)
 static int hrs_ok;
 static int32_t hrs_raw;                  /* last raw sample, for diag */
 static int32_t dc, ac_f;                 /* DC estimate, filtered AC */
-static int32_t thr_env;                  /* threshold anchored to window */
-static int beat_armed;
-static uint32_t last_peak_ms;
-static uint32_t beats;                   /* total detected peaks (diag) */
-static uint32_t last_ibi;                /* last beat-to-beat gap (diag) */
-static uint32_t ibi[4];                  /* inter-beat intervals, ms */
-static int ibi_n;
+static uint32_t beats;                   /* analysis windows run (diag) */
+static uint32_t last_ibi;                /* diag: last spectrum SNR x10 */
 static int bpm_valid, bpm;
 static int32_t win_max, prev_win;        /* |ac| max: current/last 2 s window */
 static uint32_t win_ms;
@@ -108,6 +143,144 @@ static uint32_t win_ms;
 static int16_t ppg[PPG_N];
 static int ppg_head;
 static int16_t ppg_lo = 32767, ppg_hi = -32768;
+
+/* Spectral BPM: 64 samples @10 Hz -> detrend/differentiate -> EMA
+   bandpass -> Hann -> DFT -> dominant bin in the 30-240 BPM region
+   with an SNR gate -> rolling average. Same approach as the proven
+   open-source PineTime stack; our own implementation of the maths. */
+#define HR_N   64
+#define HR_SPEC (HR_N / 2)
+static uint16_t daq[HR_N];
+static int daq_n, daq_decim;
+static float vre[HR_N], vim[HR_N];
+static float spec[HR_SPEC];
+static int spec_n, spec_reset = 1;
+static float hra[20];
+static int hra_i;
+static float last_snr;
+
+static void dft64(float *re, float *im)
+{
+    for (int i = 1, j = 0; i < HR_N; i++) {
+        int bit = HR_N >> 1;
+        for (; j & bit; bit >>= 1)
+            j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            float t = re[i]; re[i] = re[j]; re[j] = t;
+            t = im[i]; im[i] = im[j]; im[j] = t;
+        }
+    }
+    for (int len = 2; len <= HR_N; len <<= 1) {
+        int half = len >> 1;
+        for (int i = 0; i < HR_N; i += len) {
+            for (int k = 0; k < half; k++) {
+                float w_ang = -6.2831853f * k / len;
+                float wr = cosf(w_ang), wi = sinf(w_ang);
+                int a = i + k, b = a + half;
+                float xr = re[b] * wr - im[b] * wi;
+                float xi = re[b] * wi + im[b] * wr;
+                re[b] = re[a] - xr;
+                im[b] = im[a] - xi;
+                re[a] += xr;
+                im[a] += xi;
+            }
+        }
+    }
+}
+
+static const float hann[HR_N / 2] = {
+    0.0f,        0.00248461f, 0.00991376f, 0.0222136f,  0.03926189f,
+    0.06088921f, 0.08688061f, 0.11697778f, 0.15088159f, 0.1882551f,
+    0.22872687f, 0.27189467f, 0.31732949f, 0.36457977f, 0.41317591f,
+    0.46263495f, 0.51246535f, 0.56217185f, 0.61126047f, 0.65924333f,
+    0.70564355f, 0.75f,       0.79187184f, 0.83084292f, 0.86652594f,
+    0.89856625f, 0.92664544f, 0.95048443f, 0.96984631f, 0.98453864f,
+    0.99441541f, 0.99937846f
+};
+
+/* returns heart rate in Hz*100, 0 when no usable spectral peak */
+static int hr_analyse(void)
+{
+    for (int i = 0; i < HR_N; i++) {
+        vre[i] = (float)daq[i];
+        vim[i] = 0;
+    }
+    /* detrend (linear ramp) then first-difference */
+    float off = vre[0];
+    float slope = (vre[HR_N - 1] - off) / (HR_N - 1);
+    for (int i = 0; i < HR_N; i++)
+        vre[i] -= slope * i + off;
+    for (int i = 0; i < HR_N - 1; i++)
+        vre[i] = vre[i + 1] - vre[i];
+    vre[HR_N - 1] = 0;
+    /* bandpass: LP ~4 Hz x4 then HP ~0.5 Hz x4 */
+    for (int p = 0; p < 4; p++) {
+        float e = vre[0];
+        for (int i = 0; i < HR_N; i++)
+            vre[i] = e = 0.816f * vre[i] + 0.184f * e;
+    }
+    for (int p = 0; p < 4; p++) {
+        float e = vre[0];
+        for (int i = 0; i < HR_N; i++) {
+            e = 0.268f * vre[i] + 0.732f * e;
+            vre[i] -= e;
+        }
+    }
+    for (int i = 0, h = 0; i < HR_N; i++) {
+        if (i >= HR_N / 2)
+            h--;
+        vre[i] *= hann[h];
+        if (i < HR_N / 2)
+            h++;
+    }
+    dft64(vre, vim);
+    if (spec_reset) {
+        spec_reset = 0;
+        spec_n = 0;
+    }
+    for (int k = 0; k < HR_SPEC; k++) {
+        float m = sqrtf(vre[k] * vre[k] + vim[k] * vim[k]);
+        spec[k] = (spec[k] * spec_n + m) / (spec_n + 1);
+    }
+    if (spec_n < 2)
+        spec_n++;
+    /* 10 Hz over 64 bins = 0.15625 Hz/bin; 30-240 BPM -> bins 3..26 */
+    float mx = 0, sum = 0;
+    for (int k = 3; k <= 26; k++) {
+        sum += spec[k];
+        if (spec[k] > mx)
+            mx = spec[k];
+    }
+    float snr = sum > 0 ? mx / (sum / 24) : 0;
+    last_snr = snr;
+    if (snr <= 3.0f || spec[0] >= 0.5f)
+        return 0;
+    /* exactly one narrow blob above 60% of max */
+    float thr = 0.6f * mx;
+    int blobs = 0, in = 0, first = 0, last = 0;
+    float cent = 0, wsum = 0;
+    for (int k = 3; k <= 26; k++) {
+        if (spec[k] >= thr) {
+            if (!in) {
+                in = 1;
+                blobs++;
+                first = k;
+            }
+            last = k;
+            cent += spec[k] * k;
+            wsum += spec[k];
+        } else {
+            in = 0;
+        }
+    }
+    if (blobs != 1 || wsum <= 0 || (last - first) > 2)
+        return 0;
+    float hz = (cent / wsum) * 10.0f / HR_N;
+    if (hz < 40.0f / 60.0f || hz > 230.0f / 60.0f)
+        return 0;
+    return (int)(hz * 100 + 0.5f);
+}
 
 static void hrs_init(void)
 {
@@ -147,85 +320,14 @@ static void hrs_sample(uint32_t now)
         ppg_lo = 32767;
         ppg_hi = -32768;
         win_ms = now;
-        /* re-anchor the beat threshold to the measured amplitude each
-           window — a one-off spike can no longer disable detection.
-           prev_win/2: catches the systolic peak but not the smaller
-           dicrotic notch (that was doubling the apparent rate). */
-        thr_env = (prev_win >> 1) > 40 ? (prev_win >> 1) : 40;
     }
     {
         int32_t a = ac_f < 0 ? -ac_f : ac_f;
         if (a > win_max)
             win_max = a;
     }
-    if (hrs < 300 || win_max < 30) {
+    if (hrs < 300 || win_max < 30)
         bpm_valid = 0;
-        ibi_n = 0;
-    }
-
-    int32_t thr = thr_env;
-
-    /* a beat seen >3 s ago is stale — without this a lost signal leaves
-       the last measured rate on screen indefinitely */
-    if (bpm_valid && now - last_peak_ms > 3000) {
-        bpm_valid = 0;
-        ibi_n = 0;
-    }
-
-    /* arm whenever the signal crosses below the DC line — noise spikes
-       can hold ac_f high, but a real pulse always dips back through 0 */
-    if (ac_f < 0)
-        beat_armed = 1;
-    if (beat_armed && ac_f > thr && now - last_peak_ms > 300) {
-        uint32_t i = now - last_peak_ms;
-        last_ibi = i;
-        if (i > 300 && i < 2000 && last_peak_ms) {
-            /* reject outliers once the window is established: a single
-               missed or double-counted beat used to drag the median to
-               half or double the true rate for several seconds */
-            int ok = 1;
-            if (ibi_n >= 3) {
-                uint32_t s0[4];
-                for (int k = 0; k < ibi_n; k++) s0[k] = ibi[k];
-                for (int a = 0; a < ibi_n - 1; a++)
-                    for (int b = a + 1; b < ibi_n; b++)
-                        if (s0[b] < s0[a]) {
-                            uint32_t t = s0[a]; s0[a] = s0[b]; s0[b] = t;
-                        }
-                uint32_t med0 = s0[ibi_n / 2];
-                if (i < med0 * 3 / 4 || i > med0 * 4 / 3)
-                    ok = 0;
-            }
-            if (!ok) {
-                last_peak_ms = now;
-                beat_armed = 0;
-                beats++;
-            } else {
-            if (ibi_n < 4)
-                ibi[ibi_n++] = i;
-            else {
-                for (int k = 0; k < 3; k++)
-                    ibi[k] = ibi[k + 1];
-                ibi[3] = i;
-            }
-            /* median-ish: sort the small window */
-            uint32_t s[4];
-            for (int k = 0; k < ibi_n; k++) s[k] = ibi[k];
-            for (int a = 0; a < ibi_n - 1; a++)
-                for (int b = a + 1; b < ibi_n; b++)
-                    if (s[b] < s[a]) {
-                        uint32_t t = s[a]; s[a] = s[b]; s[b] = t;
-                    }
-            uint32_t med = s[ibi_n / 2];
-            bpm = (int)(60000u / med);
-            if (bpm >= 35 && bpm <= 200)
-                bpm_valid = 1;
-            }
-        }
-        last_peak_ms = now;
-        beat_armed = 0;
-        beats++;
-    }
 
     /* feed the ECG trace: clamp-filtered AC, track display range */
     int16_t v = (int16_t)(ac_f > 32700 ? 32700 : ac_f < -32700 ? -32700 : ac_f);
@@ -233,6 +335,45 @@ static void hrs_sample(uint32_t now)
     ppg_head = (ppg_head + 1) % PPG_N;
     if (v < ppg_lo) ppg_lo = v;
     if (v > ppg_hi) ppg_hi = v;
+
+    /* spectral DAQ at 10 Hz (sample cadence is ~50 ms) */
+    if (++daq_decim < 5)
+        return;
+    daq_decim = 0;
+    daq[daq_n] = (uint16_t)hrs;
+    if (daq_n < HR_N - 1) {
+        daq_n++;
+        return;
+    }
+    int hz100 = hr_analyse();
+    for (int i = 0; i < HR_N - 5; i++)   /* 0.5 s slide between runs */
+        daq[i] = daq[i + 5];
+    daq_n = HR_N - 5;
+    beats++;
+    last_ibi = (uint32_t)(last_snr * 10);
+    if (hz100 == 0) {
+        spec_reset = 1;
+        if (bpm_valid) {                 /* signal lost: drop, re-acquire */
+            for (int i = 0; i < 20; i++)
+                hra[i] = 0;
+            bpm = 0;
+            bpm_valid = 0;
+            daq_n = 0;
+        }
+        return;
+    }
+    hra[hra_i++ % 20] = hz100 / 100.0f;
+    float sum = 0;
+    int cnt = 0;
+    for (int i = 0; i < 20; i++)
+        if (hra[i] > 0) {
+            sum += hra[i];
+            cnt++;
+        }
+    if (cnt >= 3) {
+        bpm = (int)(60.0f * sum / cnt + 0.5f);
+        bpm_valid = 1;
+    }
 }
 
 /* ---- public -------------------------------------------------------------- */
@@ -258,6 +399,7 @@ void sensors_tick(uint32_t now)
 
 int sensors_bma_ok(void)  { return bma_ok; }
 int sensors_bma_z(void)   { return bma_ok ? az : 0; }
+int sensors_bma_activity(void) { return bma_ok ? (int)act_delta : 0; }
 int sensors_hrs_ok(void)  { return hrs_ok; }
 int sensors_hrs_raw(void)   { return (int)hrs_raw; }
 int sensors_hrs_ac(void)    { return (int)win_max; }
@@ -270,14 +412,16 @@ int sensors_bpm(void)
     return bpm_valid ? bpm : 0;   /* 0 = measuring / poor contact */
 }
 
-/* ECG trace data: sample i (0..PPG_N-1) oldest→newest, normalised -1..1 */
+/* ECG trace data: sample i (0..PPG_N-1) oldest→newest, normalised -1..1.
+   Real signal whenever there's measurable amplitude — a missing BPM
+   lock mustn't hide live data behind the fake waveform. */
 int sensors_ppg(int i, int *out_y100)
 {
-    if (!hrs_ok || !bpm_valid)
+    if (!hrs_ok)
         return 0;
     int idx = (ppg_head + i) % PPG_N;
     int32_t range = ppg_hi - ppg_lo;
-    if (range < 20)
+    if (range < 40)
         return 0;
     *out_y100 = (int)((ppg[idx] - ppg_lo) * 200 / range - 100);
     return 1;

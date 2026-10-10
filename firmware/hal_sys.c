@@ -166,7 +166,7 @@ static void time_init(void)
 
 /* ---- I2C (TWIM1) ------------------------------------------------------ */
 
-static uint8_t twi_buf[16] __attribute__((aligned(4)));
+static uint8_t twi_buf[80] __attribute__((aligned(4)));
 
 /* If a reset caught a slave mid-transfer it holds SDA low forever — every
    TWIM transaction then times out waiting for bus idle. Clock SCL until
@@ -223,13 +223,35 @@ static void twi_init(void)
 touch_diag_t touch_diag;
 unsigned touch_twim_enable(void) { return TWIM1_ENABLE; }
 
+static void twi_recover(void);
+
 static void twi_abort(void)
 {
     TWIM1_EVENTS_STOPPED = 0;
     TWIM1_STOP = 1;
-    for (unsigned spin = 0; spin < 100000 && !TWIM1_EVENTS_STOPPED; spin++)
-        ;
+    int stopped = 0;
+    for (unsigned spin = 0; spin < 100000 && !stopped; spin++)
+        stopped = TWIM1_EVENTS_STOPPED != 0;
     TWIM1_EVENTS_STOPPED = 0;
+    if (!stopped)
+        twi_recover();
+}
+
+/* a jammed peripheral ignores STOP — every later transfer then stalls
+   waiting for TX. Full reset: disable (aborts in-flight work), unstick
+   the lines, re-init. One bad transaction can no longer poison the bus
+   for the rest of the session. */
+static void twi_recover(void)
+{
+    TWIM1_ENABLE = 0;
+    hal_delay_ms(1);
+    twi_unstick();
+    GPIO_PIN_CNF(PIN_SDA) = (3u << 2) | (6u << 8);
+    GPIO_PIN_CNF(PIN_SCL) = (3u << 2) | (6u << 8);
+    TWIM1_PSEL_SCL = PIN_SCL;
+    TWIM1_PSEL_SDA = PIN_SDA;
+    TWIM1_FREQ = 0x06400000;
+    TWIM1_ENABLE = 6;
 }
 
 /* boot progress stripes: a colored bar per init step, top of screen.
@@ -265,7 +287,7 @@ static int twi_wait(volatile uint32_t *ev)
         }
     }
     touch_diag.twi_timeout++;
-    twi_abort();
+    twi_recover();
     return 0;
 }
 
@@ -294,13 +316,24 @@ int i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *dst, unsigned n)
     return 1;
 }
 
+int i2c_write_regs(uint8_t addr, uint8_t reg, const uint8_t *src, unsigned n);
+
 int i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val)
 {
+    return i2c_write_regs(addr, reg, &val, 1);
+}
+
+/* write `reg` followed by `n` data bytes in one transaction */
+int i2c_write_regs(uint8_t addr, uint8_t reg, const uint8_t *src, unsigned n)
+{
+    if (n + 1 > sizeof(twi_buf))
+        return 0;
     TWIM1_ADDRESS = addr;
     twi_buf[0] = reg;
-    twi_buf[1] = val;
+    for (unsigned i = 0; i < n; i++)
+        twi_buf[i + 1] = src[i];
     TWIM1_TXD_PTR = (uint32_t)twi_buf;
-    TWIM1_TXD_MAXCNT = 2;
+    TWIM1_TXD_MAXCNT = n + 1;
     TWIM1_SHORTS = 0;
     TWIM1_EVENTS_STOPPED = 0;
     TWIM1_EVENTS_ERROR = 0;
@@ -424,9 +457,13 @@ int touch_sample(int *x, int *y)
     touch_diag.last_event = d[1];
     memcpy(touch_diag.raw, d, 6);
     static uint8_t prev_gest;
-    if (fingers == 0 || event == 1)
-        prev_gest = 0;                       /* released: re-arm */
-    if (d[1] && (d[1] != prev_gest || fresh)) {
+    /* the gesture register holds its last value even after release —
+       re-arm only when it actually reads 0 (new touch clears it).
+       Re-arming on finger-up re-latched the same swipe and bounced
+       face->apps instantly after CC->face. */
+    if (d[1] == 0)
+        prev_gest = 0;
+    if (d[1] && d[1] != prev_gest) {
         last_gesture = d[1];                 /* CST816S gesture ID */
         prev_gest = d[1];
     }
