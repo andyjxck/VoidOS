@@ -165,6 +165,13 @@ static void hrs_sample(uint32_t now)
 
     int32_t thr = thr_env;
 
+    /* a beat seen >3 s ago is stale — without this a lost signal leaves
+       the last measured rate on screen indefinitely */
+    if (bpm_valid && now - last_peak_ms > 3000) {
+        bpm_valid = 0;
+        ibi_n = 0;
+    }
+
     /* arm whenever the signal crosses below the DC line — noise spikes
        can hold ac_f high, but a real pulse always dips back through 0 */
     if (ac_f < 0)
@@ -173,6 +180,27 @@ static void hrs_sample(uint32_t now)
         uint32_t i = now - last_peak_ms;
         last_ibi = i;
         if (i > 300 && i < 2000 && last_peak_ms) {
+            /* reject outliers once the window is established: a single
+               missed or double-counted beat used to drag the median to
+               half or double the true rate for several seconds */
+            int ok = 1;
+            if (ibi_n >= 3) {
+                uint32_t s0[4];
+                for (int k = 0; k < ibi_n; k++) s0[k] = ibi[k];
+                for (int a = 0; a < ibi_n - 1; a++)
+                    for (int b = a + 1; b < ibi_n; b++)
+                        if (s0[b] < s0[a]) {
+                            uint32_t t = s0[a]; s0[a] = s0[b]; s0[b] = t;
+                        }
+                uint32_t med0 = s0[ibi_n / 2];
+                if (i < med0 * 3 / 4 || i > med0 * 4 / 3)
+                    ok = 0;
+            }
+            if (!ok) {
+                last_peak_ms = now;
+                beat_armed = 0;
+                beats++;
+            } else {
             if (ibi_n < 4)
                 ibi[ibi_n++] = i;
             else {
@@ -192,6 +220,7 @@ static void hrs_sample(uint32_t now)
             bpm = (int)(60000u / med);
             if (bpm >= 35 && bpm <= 200)
                 bpm_valid = 1;
+            }
         }
         last_peak_ms = now;
         beat_armed = 0;
