@@ -108,35 +108,58 @@ static void dfu_write_magic(void)
 
 static int dfu_packet(uint16_t conn, struct os_mbuf *om)
 {
-    uint8_t t;
     d_pkt_writes++;
-    d_last_pkt0 = om->om_data[0];
+    d_last_pkt0 = OS_MBUF_PKTLEN(om) ? om->om_data[0] : -1;
     switch (dfu_state) {
-    case ST_START: /* 12-byte sizes: softdevice, bootloader, application */
-        app_size = (uint32_t)om->om_data[8] | (om->om_data[9] << 8) |
-                   ((uint32_t)om->om_data[10] << 16) |
-                   ((uint32_t)om->om_data[11] << 24);
+    case ST_START: { /* 12-byte sizes: softdevice, bootloader, application */
+        uint8_t sz[12];
+        if (os_mbuf_copydata(om, 0, sizeof sz, sz) != 0)
+            break;
+        app_size = (uint32_t)sz[8] | ((uint32_t)sz[9] << 8) |
+                   ((uint32_t)sz[10] << 16) | ((uint32_t)sz[11] << 24);
+        if (app_size == 0 || app_size > DFU_MAX_SIZE) {
+            const uint8_t d[3] = {OP_RESP, OP_START, 4};
+            dfu_notify(conn, d, 3);
+            dfu_state = ST_IDLE;
+            break;
+        }
         erased_to = 0;
         { const uint8_t d[3] = {OP_RESP, OP_START, 1};
           dfu_notify(conn, d, 3); }
         dfu_state = ST_INIT;
         break;
-    case ST_INIT: /* dat file: deviceType/rev/appVer/sd array/crc16 */
-        t = om->om_data[9]; /* sd array length */
-        expect_crc = om->om_data[10 + t * 2] |
-                     (om->om_data[11 + t * 2] << 8);
+    }
+    case ST_INIT: { /* dat file: deviceType/rev/appVer/sd array/crc16 */
+        uint8_t h[2];
+        uint16_t sd_len;
+        /* sd array length is a uint16 at offset 8; the CRC16 follows the
+           array at offset 10 + sd_len * 2 */
+        if (os_mbuf_copydata(om, 8, 2, h) != 0)
+            break;
+        sd_len = h[0] | (h[1] << 8);
+        if (OS_MBUF_PKTLEN(om) < 12u + (uint32_t)sd_len * 2u ||
+            os_mbuf_copydata(om, 10 + sd_len * 2, 2, h) != 0)
+            break;
+        expect_crc = h[0] | (h[1] << 8);
         break;
+    }
     case ST_DATA:
         pkt_count++;
         while (om) {
+            /* clamp to the remaining image bytes; anything extra a buggy
+               client sends must not write past the slot */
             unsigned want = om->om_len;
+            unsigned room = app_size - (total_len + buf_len);
+            unsigned rd = 0;
+            if (want > room)
+                want = room;
             while (want) {
                 unsigned n = sizeof(dfu_buf) - buf_len;
                 if (n > want)
                     n = want;
-                memcpy(dfu_buf + buf_len,
-                       om->om_data + om->om_len - want, n);
+                memcpy(dfu_buf + buf_len, om->om_data + rd, n);
                 buf_len += n;
+                rd += n;
                 want -= n;
                 bytes_rx += n;
                 if (buf_len == sizeof(dfu_buf))
@@ -150,7 +173,11 @@ static int dfu_packet(uint16_t conn, struct os_mbuf *om)
                                   bytes_rx >> 16, bytes_rx >> 24};
             dfu_notify(conn, d, 5);
         }
-        if (buf_len > 0 && total_len + buf_len == app_size) {
+        /* total_len+buf_len hits app_size exactly, even when the final
+           dfu_flush just emptied buf_len (app_size % 200 == 0) — without
+           this the RECV_IMG response was never sent and the client
+           stalled waiting for it */
+        if (total_len + buf_len == app_size) {
             dfu_flush();
             if (app_size < DFU_MAX_SIZE)
                 dfu_write_magic();
@@ -167,22 +194,29 @@ static int dfu_packet(uint16_t conn, struct os_mbuf *om)
 
 static int dfu_control(uint16_t conn, struct os_mbuf *om)
 {
+    uint8_t op0 = 0, op1 = 0;
     d_ctrl_writes++;
-    d_last_op0 = om->om_data[0];
-    d_last_op1 = om->om_len > 1 ? om->om_data[1] : -1;
-    switch (om->om_data[0]) {
+    if (os_mbuf_copydata(om, 0, 1, &op0) != 0)
+        return 0;
+    os_mbuf_copydata(om, 1, 1, &op1);
+    d_last_op0 = op0;
+    d_last_op1 = op1;
+    switch (op0) {
     case OP_START:
-        if (dfu_state == ST_IDLE && om->om_data[1] == 0x04)
+        if (dfu_state == ST_IDLE && op1 == 0x04)
             dfu_state = ST_START;
         break;
     case OP_INIT:
-        if (dfu_state == ST_INIT) {
+        /* only init-complete (param != 0) gets a response; answering the
+           init-start write can let the client send RECEIVE_IMAGE before
+           the dat file lands */
+        if (dfu_state == ST_INIT && op1 != 0) {
             const uint8_t d[3] = {OP_RESP, OP_INIT, 1};
             dfu_notify(conn, d, 3);
         }
         break;
     case OP_PRN_REQ:
-        prn_every = om->om_data[1];
+        prn_every = op1;
         break;
     case OP_SYS_RESET:
         /* buttonless flow: the client asks us to reset "into DFU mode".

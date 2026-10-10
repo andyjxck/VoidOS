@@ -28,10 +28,15 @@ build/test_input: $(CORE_SRC) simulator/sdl_hal.c tests/test_input.c
 	mkdir -p build
 	$(CC) $(CFLAGS) $(SDL_CFLAGS) $(TTF_CFLAGS) $(IMG_CFLAGS) $^ -o $@ $(SDL_LIBS) $(TTF_LIBS) $(IMG_LIBS)
 
-test: build/test_app build/test_screenshot build/test_input
+build/test_ble_dfu: tests/dfu/test_ble_dfu.c firmware/nimble_port/src/ble_dfu.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -Itests/dfu/stubs -Ifirmware tests/dfu/test_ble_dfu.c -o $@
+
+test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu
 	./build/test_app
 	SDL_VIDEODRIVER=dummy ./build/test_screenshot
 	SDL_VIDEODRIVER=dummy ./build/test_input
+	./build/test_ble_dfu
 
 clean:
 	rm -f build/voidos-sim build/test_app build/test_screenshot build/test_input
