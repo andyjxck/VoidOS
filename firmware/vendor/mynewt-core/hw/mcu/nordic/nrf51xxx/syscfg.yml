@@ -1,0 +1,147 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+syscfg.defs:
+    MCU_TARGET:
+        description: >
+            Specifies target MCU, shall be set by BSP.
+        value: nRF51822
+        choices:
+            - nRF51822
+            - nRF51822_16K
+
+    MCU_FLASH_MIN_WRITE_SIZE:
+        description: >
+            Specifies the required alignment for internal flash writes.
+            Used internally by the newt tool.
+        value: 1
+
+    MCU_DCDC_ENABLED:
+        description: >
+            Specifies whether or not to enable DC/DC regulator. This requires
+            external circuitry so is defined to be zero by default and
+            expected to be overridden by the BSP.
+        value: 0
+
+    MCU_COMMON_STARTUP:
+        description: >
+            Enables generic startup code. This allows BSP to not include own
+            startup code.
+        value: 0
+
+    I2C_0:
+        description: 'I2C (TWI) interface 0'
+        value:  0
+        restrictions:
+            - "!SPI_0_MASTER"
+            - "!SPI_0_SLAVE"
+    I2C_1:
+        description: 'I2C (TWI) interface 1'
+        value:  0
+        restrictions:
+            - "!SPI_1_MASTER"
+            - "!SPI_1_SLAVE"
+
+    SPI_0_MASTER:
+        description: 'SPI 0 master'
+        value:  0
+        restrictions:
+            - "!SPI_0_SLAVE"
+            - "!I2C_0"
+    SPI_0_SLAVE:
+        description: 'SPI 0 slave'
+        value:  0
+        restrictions:
+            - "!SPI_0_MASTER"
+            - "!I2C_0"
+
+    SPI_1_MASTER:
+        description: 'SPI 1 master'
+        value:  0
+        restrictions:
+            - "!SPI_1_SLAVE"
+            - "!I2C_1"
+    SPI_1_SLAVE:
+        description: 'SPI 1 slave'
+        value:  0
+        restrictions:
+            - "!SPI_1_MASTER"
+            - "!I2C_1"
+
+    ADC_0:
+        description: 'ADC'
+        value:  0
+
+    ADC_0_REFMV_0:
+        description: 'reference mV in AREF0 if used'
+        value: 0
+    ADC_0_REFMV_1:
+        description: 'reference mV in AREF1 if used'
+        value: 0
+    ADC_0_REFMV_VDD:
+        description: 'reference mV in VDD if used'
+        value: 0
+
+    MCU_LFCLK_SOURCE:
+        description: >
+            Selected source for low frequency clock (LFCLK).
+        value:
+        restrictions:
+            - '!BLE_CONTROLLER || (MCU_LFCLK_SOURCE != "LFRC")'
+        choices:
+            - LFRC      # 32.768 kHz RC oscillator
+            - LFXO      # 32.768 kHz crystal oscillator
+            - LFSYNTH   # 32.768 kHz synthesized from HFCLK
+
+    # Deprecated settings
+
+    XTAL_32768:
+        description: "Use 'MCU_LFCLK_SOURCE: LFXO' instead"
+        value: 0
+        restrictions:
+            - "!XTAL_32768_SYNTH"
+            - "!XTAL_RC"
+        deprecated: 1
+    XTAL_RC:
+        description: "Use 'MCU_LFCLK_SOURCE: LFRC' instead"
+        value: 0
+        restrictions:
+            - "!XTAL_32768_SYNTH"
+            - "!XTAL_32768"
+        deprecated: 1
+    XTAL_32768_SYNTH:
+        description: "Use 'MCU_LFCLK_SOURCE: LFSYNTH' instead"
+        value: 0
+        restrictions:
+            - "!XTAL_RC"
+            - "!XTAL_32768"
+        deprecated: 1
+
+
+syscfg.vals:
+    # The nRF51 microcontroller uses RTC0 for periodic interrupts and it is
+    # clocked at 32768Hz. The tick frequency is chosen such that it divides
+    # cleanly into 32768 to avoid a systemic bias in the actual tick frequency.
+    OS_TICKS_PER_SEC: 128
+
+syscfg.vals.XTAL_32768:
+    MCU_LFCLK_SOURCE: LFXO
+syscfg.vals.XTAL_RC:
+    MCU_LFCLK_SOURCE: LFRC
+syscfg.vals.XTAL_32768_SYNTH:
+    MCU_LFCLK_SOURCE: LFSYNTH

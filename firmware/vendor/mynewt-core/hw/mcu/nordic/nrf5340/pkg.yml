@@ -1,0 +1,118 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+pkg.name: hw/mcu/nordic/nrf5340
+pkg.description: MCU definition for Nordic nRF5340 ARM Cortex-M33 chip.
+pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
+pkg.homepage: "http://mynewt.apache.org/"
+pkg.keywords:
+    - nrf53
+    - nrfx
+
+pkg.deps:
+    - "@apache-mynewt-core/hw/mcu/nordic"
+    - "@apache-mynewt-core/hw/cmsis-core"
+    - "@apache-mynewt-core/hw/hal"
+    - "@apache-mynewt-core/hw/mcu/nordic/nrf5340/tfm"
+
+pkg.deps.BUS_DRIVER_PRESENT:
+    - "@apache-mynewt-core/hw/bus/drivers/spi_hal"
+    - "@apache-mynewt-core/hw/bus/drivers/i2c_common"
+    - "@apache-mynewt-core/hw/bus/drivers/i2c_nrf5340"
+
+pkg.cflags.NFC_PINS_AS_GPIO:
+    - '-DCONFIG_NFCT_PINS_AS_GPIOS=1'
+
+pkg.cflags.GPIO_AS_PIN_RESET:
+    - '-DCONFIG_GPIO_AS_PINRESET=1'
+pkg.cflags:
+    - -mcmse
+
+pkg.deps.UART_0:
+    - "@apache-mynewt-core/hw/drivers/uart/uart_hal"
+
+pkg.deps.UART_1:
+    - "@apache-mynewt-core/hw/drivers/uart/uart_hal"
+
+pkg.deps.UART_2:
+    - "@apache-mynewt-core/hw/drivers/uart/uart_hal"
+
+pkg.deps.UART_3:
+    - "@apache-mynewt-core/hw/drivers/uart/uart_hal"
+
+#nrf52 driver is using nrfx so we can just reuse it
+pkg.deps.ADC_0:
+    - "@apache-mynewt-core/hw/drivers/adc/adc_nrf52"
+
+#nrf52 driver is using nrfx so we can just reuse it
+pkg.deps.PWM_0:
+    - "@apache-mynewt-core/hw/drivers/pwm/pwm_nrf52"
+
+pkg.deps.PWM_1:
+    - "@apache-mynewt-core/hw/drivers/pwm/pwm_nrf52"
+
+pkg.deps.PWM_2:
+    - "@apache-mynewt-core/hw/drivers/pwm/pwm_nrf52"
+
+pkg.deps.PWM_3:
+    - "@apache-mynewt-core/hw/drivers/pwm/pwm_nrf52"
+
+pkg.deps.SPI_0_MASTER:
+    - "@apache-mynewt-core/hw/bus"
+    - "@apache-mynewt-core/hw/bus/drivers/spi_hal"
+
+pkg.deps.SPI_1_MASTER:
+    - "@apache-mynewt-core/hw/bus"
+    - "@apache-mynewt-core/hw/bus/drivers/spi_hal"
+
+pkg.deps.SPI_2_MASTER:
+    - "@apache-mynewt-core/hw/bus"
+    - "@apache-mynewt-core/hw/bus/drivers/spi_hal"
+
+pkg.deps.SPI_3_MASTER:
+    - "@apache-mynewt-core/hw/bus"
+    - "@apache-mynewt-core/hw/bus/drivers/spi_hal"
+
+pkg.deps.SPI_4_MASTER:
+    - "@apache-mynewt-core/hw/bus"
+    - "@apache-mynewt-core/hw/bus/drivers/spi_hal"
+
+pkg.deps.I2C_0':
+    - "@apache-mynewt-core/hw/bus/drivers/i2c_nrf5340"
+
+pkg.deps.I2C_1':
+    - "@apache-mynewt-core/hw/bus/drivers/i2c_nrf5340"
+
+pkg.deps.I2C_2':
+    - "@apache-mynewt-core/hw/bus/drivers/i2c_nrf5340"
+
+pkg.deps.I2C_3':
+    - "@apache-mynewt-core/hw/bus/drivers/i2c_nrf5340"
+
+pkg.deps.NRF5340_EMBED_NET_CORE:
+    - "@apache-mynewt-core/hw/mcu/nordic/nrf5340/net_core_image"
+
+pkg.cflags.MCU_NRF5340_EN_APPROTECT_USERHANDLING:
+    - "-DENABLE_APPROTECT_USER_HANDLING"
+
+pkg.deps.MCU_DEFAULT_STARTUP:
+    - "@apache-mynewt-core/hw/mcu/nordic/nrf5340/startup"
+
+pkg.deps.MCU_MPU_ENABLE:
+    - "@apache-mynewt-core/hw/mcu/nordic/nrf5340/mpu"

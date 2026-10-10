@@ -1,0 +1,236 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+syscfg.defs:
+    USBD_STRING_DESCRIPTOR_MAX_LENGTH:
+        description: Maximum length of string descriptor in characters
+        value: 31
+    USBD_EP0_SIZE:
+        description: >
+            Endpoint 0 size
+        value: 64
+    USBD_VID:
+        description: Vendor ID
+        value:
+        restrictions:
+            - $notnull
+    USBD_PID:
+        description: Product ID
+        value:
+        restrictions:
+            - $notnull
+    USBD_PRODUCT_RELEASE_NUMBER:
+        description: Product release number needed for USB descriptor
+        value: 0x100
+    USBD_CONFIGURATION_MAX_POWER:
+        description: >
+            Maximum power consumption of the USB device from the bus in this specific
+            configuration when the device is fully operational. Expressed in 2 mA units
+            (i.e., 50 = 100 mA).
+        value: 100
+    USBD_CONFIGURATION_SELF_POWERED:
+        description: >
+            Set to 1 when produce is self powered USB device.
+        value: 0
+    USBD_CONFIGURATION_REMOTE_WAKEUP:
+        description: >
+            Set to 1 when if USB remote wakeup is supported.
+        value: 0
+    USBD_LANGID:
+        description: Language ID as specified by usb.org
+        value: 0x0409
+    USBD_VENDOR_STRING:
+        description: Manufacturer identification string
+        value: '"Vendor string"'
+    USBD_PRODUCT_STRING:
+        description: Device friendly name
+        value: '"Dev device"'
+    USBD_COMPOSITE_DEVICE:
+        description: >
+            When set to 1 device descriptor will have values assigned to
+            composite device. Device class = 0xFE, subclasss = 2,
+            protocol = 1.
+        value: 0
+    USBD_DEVICE_CLASS:
+        description: >
+            Device class that will be reported in device descriptors.
+            If 0 (preferred) class is specified in interface only.
+            Can be 0xFF for vendor specific.
+        value: 0
+    USBD_DEVICE_SUBCLASS:
+        description: >
+            Device sub class that will be reported in device descriptors.
+            If USBD_DEVICE_CLASS is 0 this also has to be 0.
+        value: 0
+    USBD_DEVICE_PROTOCOL:
+        description: >
+            Device class protocol that will be reported in device descriptors.
+        value: 0
+    USBD_CDC:
+        description: Enable CDC device function in TinyUSB stack (other then console or hci).
+        value:
+    USBD_CDC_CONSOLE:
+        description: Enable CDC device function for console in TinyUSB stack.
+        value:
+    USBD_HID:
+        description: Enable HID device function in TinyUSB stack.
+        value:
+    USBD_MSC:
+        description: Enable MSC device function in TinyUSB stack.
+        value:
+    USBD_BTH:
+        description: Enable BT HCI device function in TinyUSB stack.
+        value:
+    USBD_DFU:
+        description: >
+            Enable DFU interface in TinyUSB.  This adds USB descriptor to
+            USB configuration.  It does not add TinyUSB callbacks implementation,
+            if standard implementation exposing SLOT1 is required USB_DFU_STD can
+            be additionally specified.
+        value:
+    USBD_DFU_STD:
+        description: >
+            Add Mynewt standard DFU interface implementation.
+            It will include hw/tinyusb/dfu package with mynewt standard
+            DFU implementation.
+        value: 0
+
+    USBD_CDC_DATA_OUT_EP:
+        description: CDC data out endpoint number
+        value:
+    USBD_CDC_DATA_IN_EP:
+        description: CDC data in endpoint number
+        value:
+    USBD_CDC_DATA_EP_SIZE:
+        description: CDC data endpoint size
+        value:
+    USBD_CDC_NOTIFY_EP:
+        description: CDC notify endpoint number
+        value:
+    USBD_CDC_NOTIFY_EP_SIZE:
+        description: CDC notify endpoint size
+        value:
+    USBD_CDC_RX_BUFSIZE:
+        description: CDC endpoint OUT FIFO size
+        value:
+    USBD_CDC_TX_BUFSIZE:
+        description: CDC endpoint IN FIFO size
+        value:
+
+    USBD_CDC_DESCRIPTOR_STRING:
+        description: String for CDC interface
+        value:
+
+    USBD_MSC_DESCRIPTOR_STRING:
+        description: String for MSC interface
+        value:
+
+    USBD_HID_DESCRIPTOR_STRING:
+        description: String for HID interface
+        value:
+
+    USBD_BTH_DESCRIPTOR_STRING:
+        description: String for BT descriptor
+        value:
+
+    USBD_HID_REPORT_EP:
+        description: HID report endpoint number
+        value:
+    USBD_HID_REPORT_EP_SIZE:
+        description: HID report endpoint size
+        value:
+    USBD_HID_REPORT_EP_INTERVAL:
+        description: HID report endpoint interval
+        value:
+
+    USBD_HID_REPORT_ID_KEYBOARD:
+        description: HID keyboard report ID. 0 Or empty to ommit the report.
+        value:
+    USBD_HID_CAPS_LOCK_LED_PIN:
+        description: Caps Lock LED
+        value: -1
+    USBD_HID_CAPS_LOCK_LED_ON_VALUE:
+        description: Value to set to pin to turn led on
+        value: 0
+    USBD_HID_NUM_LOCK_LED_PIN:
+        description: Num Lock LED
+        value: -1
+    USBD_HID_NUM_LOCK_LED_ON_VALUE:
+        description: Value to set to pin to turn led on
+        value: 0
+    USBD_HID_REPORT_ID_MOUSE:
+        description: HID keyboard report ID. 0 Or empty to ommit the report.
+        value:
+
+    USBD_BTH_EVENT_EP:
+        description: BTH event endpoint number
+        value:
+    USBD_BTH_EVENT_EP_SIZE:
+        description: BTH event endpoint size
+        value:
+    USBD_BTH_EVENT_EP_INTERVAL:
+        description: BTH event endpoint interval
+        value: 1
+    USBD_BTH_DATA_IN_EP:
+        description: BTH data in endpoint number
+        value:
+    USBD_BTH_DATA_OUT_EP:
+        description: BTH data out endpoint number
+        value:
+    USBD_BTH_DATA_EP_SIZE:
+        description: BTH data endpoints size
+        value:
+
+    USBD_MSC_DATA_IN_EP:
+        description: MSC data in endpoint number
+        value:
+    USBD_MSC_DATA_OUT_EP:
+        description: MSC data out endpoint number
+        value:
+    USBD_MSC_EP_BUFSIZE:
+        description: MSC data endpoint buffer size
+        value:
+
+    USBD_WINDOWS_COMP_ID:
+        description: >
+            Add Windows compatibility descriptor.
+        value: 0
+    USBD_WINDOWS_COMP_ID_STRING:
+        description: >
+            Windows Compatibility ID String.
+        value: '"WINUSB"'
+    USBD_WINDOWS_COMP_INTERFACE:
+        description: >
+            Interface number associated with USBD_WINDOWS_COMP_ID.
+        value: 0
+
+    CFG_TUSB_DEBUG:
+        description: >
+            When set to value > 0 enables TinyUSB logs and redirects them to Mynewt console.
+            It activates logs created by TU_LOG1, TU_LOG2, TU_LOG3
+        range: 0..3
+        value: 0
+
+syscfg.restrictions:
+    - '(CFG_TUSB_DEBUG == 0) || (USBD_STACK_SIZE >= 400)'
+
+syscfg.vals.USBD_COMPOSITE_DEVICE:
+    USBD_DEVICE_CLASS: TUSB_CLASS_MISC
+    USBD_DEVICE_SUBCLASS: MISC_SUBCLASS_COMMON
+    USBD_DEVICE_PROTOCOL: MISC_PROTOCOL_IAD

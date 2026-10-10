@@ -1,0 +1,397 @@
+/* InfiniTime-compatible BLE DFU service (0x1530/1531/1532/1534). Receives a
+   signed MCUBoot image over BLE and writes it to the external SPI flash
+   secondary slot at 0x40000. The image is left UNCONFIRMED: the bootloader
+   test-boots it once, and a manual restart always reverts to the previous
+   firmware unless the app explicitly confirms itself. */
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include "os/os_mbuf.h"
+#include "host/ble_hs.h"
+#include "host/ble_gatt.h"
+#include "host/ble_uuid.h"
+#include "board.h"
+
+#define DFU_WRITE_OFFSET 0x40000u
+#define DFU_MAX_SIZE     475136u
+#define DFU_MAGIC_ADDR   (DFU_WRITE_OFFSET + DFU_MAX_SIZE - 16)
+
+enum { ST_IDLE, ST_START, ST_INIT, ST_DATA, ST_VALIDATE, ST_VALIDATED };
+enum { OP_START = 1, OP_INIT = 2, OP_RECV_IMG = 3, OP_VALIDATE = 4,
+       OP_ACTIVATE = 5, OP_SYS_RESET = 6, OP_PRN_REQ = 8,
+       OP_RESP = 0x10, OP_PRN = 0x11 };
+
+static const ble_uuid128_t dfu_svc_uuid = BLE_UUID128_INIT(
+    0x23, 0xD1, 0xBC, 0xEA, 0x5F, 0x78, 0x23, 0x15,
+    0xDE, 0xEF, 0x12, 0x12, 0x30, 0x15, 0x00, 0x00);
+static const ble_uuid128_t dfu_pkt_uuid = BLE_UUID128_INIT(
+    0x23, 0xD1, 0xBC, 0xEA, 0x5F, 0x78, 0x23, 0x15,
+    0xDE, 0xEF, 0x12, 0x12, 0x32, 0x15, 0x00, 0x00);
+static const ble_uuid128_t dfu_ctrl_uuid = BLE_UUID128_INIT(
+    0x23, 0xD1, 0xBC, 0xEA, 0x5F, 0x78, 0x23, 0x15,
+    0xDE, 0xEF, 0x12, 0x12, 0x31, 0x15, 0x00, 0x00);
+static const ble_uuid128_t dfu_rev_uuid = BLE_UUID128_INIT(
+    0x23, 0xD1, 0xBC, 0xEA, 0x5F, 0x78, 0x23, 0x15,
+    0xDE, 0xEF, 0x12, 0x12, 0x34, 0x15, 0x00, 0x00);
+/* vendor diag chars (read-only): dump bring-up state as short text */
+static const ble_uuid128_t diag_uuid = BLE_UUID128_INIT(
+    0x77, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+    0x88, 0x99, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x00);
+static const ble_uuid128_t diag2_uuid = BLE_UUID128_INIT(
+    0x77, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+    0x88, 0x99, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x01);
+/* standard Current Time Service: phones (Gadgetbridge, nRF Connect)
+   write 0x2A2B on connect — that's how the face gets real time */
+static const ble_uuid16_t cts_svc_uuid = BLE_UUID16_INIT(0x1805);
+static const ble_uuid16_t cts_ct_uuid  = BLE_UUID16_INIT(0x2A2B);
+
+static int dfu_state;
+static int flash_ready;
+static uint16_t h_pkt, h_ctrl, h_rev, h_diag, h_diag2;
+static uint8_t dfu_buf[200];
+static unsigned buf_len, total_len, app_size;
+static uint32_t erased_to; /* pay-as-you-go erase frontier */
+static uint16_t expect_crc;
+static uint8_t prn_every;
+static uint32_t pkt_count, bytes_rx;
+static int d_ctrl_writes, d_pkt_writes, d_notify_rc = -1;
+static int d_access_calls;        /* every gatt access cb invocation */
+static int d_last_op0 = -1, d_last_op1 = -1, d_last_pkt0 = -1;
+
+/* erase 4 KB sectors only just before they're written — keeps the BLE
+   callback short so the connection survives the transfer */
+static void dfu_erase_to(uint32_t end)
+{
+    if (!flash_ready) {
+        spi_flash_init();
+        flash_ready = 1;
+    }
+    while (erased_to < end) {
+        spi_flash_sector_erase(DFU_WRITE_OFFSET + erased_to);
+        erased_to += 0x1000;
+        wdt_kick();
+    }
+}
+
+static void dfu_notify(uint16_t conn, const uint8_t *d, unsigned n)
+{
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(d, n);
+    d_notify_rc = om ? ble_gatts_notify_custom(conn, h_ctrl, om) : -2;
+}
+
+static uint16_t crc16(const uint8_t *p, uint32_t n, uint16_t crc)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        crc = (uint8_t)(crc >> 8) | (crc << 8);
+        crc ^= p[i];
+        crc ^= (uint8_t)(crc & 0xFF) >> 4;
+        crc ^= (crc << 8) << 4;
+        crc ^= ((crc & 0xFF) << 4) << 1;
+    }
+    return crc;
+}
+
+static void dfu_flush(void)
+{
+    dfu_erase_to(total_len + buf_len);
+    spi_flash_write(DFU_WRITE_OFFSET + total_len, dfu_buf, buf_len);
+    total_len += buf_len;
+    buf_len = 0;
+}
+
+static void dfu_write_magic(void)
+{
+    const uint32_t magic[4] = {0xf395c277, 0x7fefd260, 0x0f505235, 0x8079b62c};
+    dfu_erase_to(DFU_MAX_SIZE);
+    spi_flash_write(DFU_MAGIC_ADDR, (const uint8_t *)magic, 16);
+}
+
+static int dfu_packet(uint16_t conn, struct os_mbuf *om)
+{
+    uint8_t t;
+    d_pkt_writes++;
+    d_last_pkt0 = om->om_data[0];
+    switch (dfu_state) {
+    case ST_START: /* 12-byte sizes: softdevice, bootloader, application */
+        app_size = (uint32_t)om->om_data[8] | (om->om_data[9] << 8) |
+                   ((uint32_t)om->om_data[10] << 16) |
+                   ((uint32_t)om->om_data[11] << 24);
+        erased_to = 0;
+        { const uint8_t d[3] = {OP_RESP, OP_START, 1};
+          dfu_notify(conn, d, 3); }
+        dfu_state = ST_INIT;
+        break;
+    case ST_INIT: /* dat file: deviceType/rev/appVer/sd array/crc16 */
+        t = om->om_data[9]; /* sd array length */
+        expect_crc = om->om_data[10 + t * 2] |
+                     (om->om_data[11 + t * 2] << 8);
+        break;
+    case ST_DATA:
+        pkt_count++;
+        while (om) {
+            unsigned want = om->om_len;
+            while (want) {
+                unsigned n = sizeof(dfu_buf) - buf_len;
+                if (n > want)
+                    n = want;
+                memcpy(dfu_buf + buf_len,
+                       om->om_data + om->om_len - want, n);
+                buf_len += n;
+                want -= n;
+                bytes_rx += n;
+                if (buf_len == sizeof(dfu_buf))
+                    dfu_flush();
+            }
+            om = SLIST_NEXT(om, om_next);
+        }
+        if (prn_every && (pkt_count % prn_every) == 0 &&
+            bytes_rx != app_size) {
+            const uint8_t d[5] = {OP_PRN, bytes_rx, bytes_rx >> 8,
+                                  bytes_rx >> 16, bytes_rx >> 24};
+            dfu_notify(conn, d, 5);
+        }
+        if (buf_len > 0 && total_len + buf_len == app_size) {
+            dfu_flush();
+            if (app_size < DFU_MAX_SIZE)
+                dfu_write_magic();
+            const uint8_t d[3] = {OP_RESP, OP_RECV_IMG, 1};
+            dfu_notify(conn, d, 3);
+            dfu_state = ST_VALIDATE;
+        }
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
+static int dfu_control(uint16_t conn, struct os_mbuf *om)
+{
+    d_ctrl_writes++;
+    d_last_op0 = om->om_data[0];
+    d_last_op1 = om->om_len > 1 ? om->om_data[1] : -1;
+    switch (om->om_data[0]) {
+    case OP_START:
+        if (dfu_state == ST_IDLE && om->om_data[1] == 0x04)
+            dfu_state = ST_START;
+        break;
+    case OP_INIT:
+        if (dfu_state == ST_INIT) {
+            const uint8_t d[3] = {OP_RESP, OP_INIT, 1};
+            dfu_notify(conn, d, 3);
+        }
+        break;
+    case OP_PRN_REQ:
+        prn_every = om->om_data[1];
+        break;
+    case OP_SYS_RESET:
+        /* buttonless flow: the client asks us to reset "into DFU mode".
+           Our image is an unconfirmed test image, so the bootloader
+           reverts to InfiniTime — which IS the working DFU target —
+           and the client's push continues there. */
+        SCB_AIRCR = 0x05FA0004;
+        break;
+    case OP_RECV_IMG:
+        if (dfu_state == ST_INIT) {
+            buf_len = total_len = bytes_rx = pkt_count = 0;
+            dfu_state = ST_DATA;
+        }
+        break;
+    case OP_VALIDATE: {
+        if (dfu_state != ST_VALIDATE)
+            break;
+        uint8_t rd[200];
+        uint16_t crc = 0xFFFF;
+        int first = 1;
+        for (uint32_t off = 0; off < app_size; off += 200) {
+            uint32_t n = app_size - off > 200 ? 200 : app_size - off;
+            spi_flash_read(DFU_WRITE_OFFSET + off, rd, n);
+            crc = crc16(rd, n, first ? 0xFFFF : crc);
+            first = 0;
+            wdt_kick();
+        }
+        const uint8_t d[3] = {OP_RESP, OP_VALIDATE,
+                              crc == expect_crc ? 1 : 5};
+        dfu_notify(conn, d, 3);
+        if (crc == expect_crc)
+            dfu_state = ST_VALIDATED;
+        else
+            dfu_state = ST_IDLE;
+        break;
+    }
+    case OP_ACTIVATE:
+        if (dfu_state == ST_VALIDATED)
+            SCB_AIRCR = 0x05FA0004; /* reset; bootloader swaps slot */
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
+/* Write s into the response mbuf; if append fails, report the buffer's
+   real trailing space + databuf size instead so we can see why. */
+static int diag_put(struct os_mbuf *om, const char *s, int n)
+{
+    struct os_mbuf *last = om;
+    int sp;
+
+    while (SLIST_NEXT(last, om_next) != NULL)
+        last = SLIST_NEXT(last, om_next);
+    sp = OS_MBUF_TRAILINGSPACE(last);
+    if (os_mbuf_append(om, s, n) == 0)
+        return 0;
+    {
+        char d[48];
+        int dn = snprintf(d, sizeof d, "sp:%d n:%d dl:%u",
+                          sp, n,
+                          last->om_omp
+                              ? (unsigned)last->om_omp->omp_databuf_len : 0u);
+        if (os_mbuf_append(om, d, dn) == 0)
+            return 0;
+    }
+    return os_mbuf_append(om, "?", 1) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+}
+
+/* touch state: "CID|F|raw|reads|errors"  (~24 bytes) */
+static uint16_t h_cts;
+
+/* Current Time char: 10 bytes — year le16, mon, day, h, m, s, dow,
+   frac256, adjust-reason. Write = phone syncing us; read = current. */
+static int cts_access(uint16_t conn, uint16_t attr,
+                      struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn; (void)attr; (void)arg;
+    extern void hal_clock_set(int, int, int, int, int, int, int);
+    extern int hal_clock_hour(void), hal_clock_minute(void),
+               hal_clock_second(void);
+    extern void hal_clock_date(int *, int *, int *, int *);
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        uint8_t t[10];
+        if (os_mbuf_copydata(ctxt->om, 0, sizeof t, t) != 0)
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        hal_clock_set(t[0] | (t[1] << 8), t[2], t[3], t[7],
+                      t[4], t[5], t[6]);
+        return 0;
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        int y, mo, d, dow;
+        uint8_t t[10];
+        hal_clock_date(&y, &mo, &d, &dow);
+        t[0] = (uint8_t)y; t[1] = (uint8_t)(y >> 8);
+        t[2] = (uint8_t)mo; t[3] = (uint8_t)d;
+        t[4] = (uint8_t)hal_clock_hour();
+        t[5] = (uint8_t)hal_clock_minute();
+        t[6] = (uint8_t)hal_clock_second();
+        t[7] = (uint8_t)dow; t[8] = 0; t[9] = 0;
+        return os_mbuf_append(ctxt->om, t, sizeof t)
+                   ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+    }
+    return 0;
+}
+
+static int diag_read(struct os_mbuf *om)
+{
+    char s[56];
+    extern unsigned touch_twim_enable(void);
+    extern int d_subscribed, d_mtu_events;
+    int n = snprintf(s, sizeof s,
+        "C%XF%dR%uE%uT%uL%XEN%uB%Xst%uLt%uV%du%dm%do%d.%d",
+        touch_diag.chip_id, touch_diag.last_fingers,
+        touch_diag.reads, touch_diag.twi_err, touch_diag.twi_timeout,
+        touch_diag.last_err, touch_twim_enable(), touch_diag.bus_lvl,
+        touch_diag.stall, touch_diag.latches,
+        d_access_calls, d_subscribed, d_mtu_events,
+        d_last_op0, d_last_op1);
+    return diag_put(om, s, n);
+}
+
+/* sensors+dfu: "scan|HR|ST|dfu"  (~30 bytes) */
+static int diag_read2(struct os_mbuf *om)
+{
+    char s[64];
+    extern int sensors_bpm(void), sensors_steps(void);
+    extern int sensors_hrs_ok(void), sensors_bma_ok(void);
+    extern int sensors_hrs_raw(void), sensors_hrs_ac(void);
+    extern int sensors_hrs_beats(void), sensors_hrs_ibi(void);
+    int n = snprintf(s, sizeof s,
+        "I%02X%02X%02X M%d H%d.%d r%d a%d b%ui%u S%d.%d D%dC%dP%dN%d",
+        touch_diag.scan[0], touch_diag.scan[1], touch_diag.scan[2],
+        os_msys_num_free(),
+        sensors_hrs_ok(), sensors_bpm(),
+        sensors_hrs_raw(), sensors_hrs_ac(), sensors_hrs_beats(),
+        sensors_hrs_ibi(),
+        sensors_bma_ok(), sensors_steps(),
+        dfu_state, d_ctrl_writes, d_pkt_writes, d_notify_rc);
+    return diag_put(om, s, n);
+}
+
+int ble_dfu_busy(void) { return dfu_state != 0; }
+
+static int dfu_access(uint16_t conn, uint16_t attr,
+                      struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)arg;
+    if (attr != h_diag && attr != h_diag2)   /* don't count our own probes */
+        d_access_calls++;
+    if (attr == h_ctrl)
+        return dfu_control(conn, ctxt->om);
+    if (attr == h_pkt)
+        return dfu_packet(conn, ctxt->om);
+    if (attr == h_rev && ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        const uint16_t rev = 8;
+        return os_mbuf_append(ctxt->om, &rev, 2)
+                   ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    if (attr == h_diag && ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
+        return diag_read(ctxt->om);
+    if (attr == h_diag2 && ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
+        return diag_read2(ctxt->om);
+    return 0;
+}
+
+static const struct ble_gatt_chr_def dfu_chrs[] = {
+    {.uuid = &dfu_pkt_uuid.u, .access_cb = dfu_access,
+     .flags = BLE_GATT_CHR_F_WRITE_NO_RSP, .val_handle = &h_pkt},
+    {.uuid = &dfu_ctrl_uuid.u, .access_cb = dfu_access,
+     .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
+              BLE_GATT_CHR_F_NOTIFY,
+     .val_handle = &h_ctrl},
+    {.uuid = &dfu_rev_uuid.u, .access_cb = dfu_access,
+     .flags = BLE_GATT_CHR_F_READ, .val_handle = &h_rev},
+    {.uuid = &diag_uuid.u, .access_cb = dfu_access,
+     .flags = BLE_GATT_CHR_F_READ, .val_handle = &h_diag},
+    {.uuid = &diag2_uuid.u, .access_cb = dfu_access,
+     .flags = BLE_GATT_CHR_F_READ, .val_handle = &h_diag2},
+    {0},
+};
+static const struct ble_gatt_chr_def cts_chrs[] = {
+    {.uuid = &cts_ct_uuid.u, .access_cb = cts_access,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
+              BLE_GATT_CHR_F_NOTIFY,
+     .val_handle = &h_cts},
+    {0},
+};
+
+static const struct ble_gatt_svc_def dfu_svcs[] = {
+    {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &dfu_svc_uuid.u,
+     .characteristics = dfu_chrs},
+    {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &cts_svc_uuid.u,
+     .characteristics = cts_chrs},
+    {0},
+};
+
+void ble_dfu_init(void)
+{
+    ble_gatts_count_cfg(dfu_svcs);
+    ble_gatts_add_svcs(dfu_svcs);
+}
+
+void ble_dfu_diag(int *state, int *ctrl, int *pkt, int *rc, unsigned *bytes)
+{
+    *state = dfu_state;
+    *ctrl = d_ctrl_writes;
+    *pkt = d_pkt_writes;
+    *rc = d_notify_rc;
+    *bytes = bytes_rx;
+}

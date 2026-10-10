@@ -1,0 +1,431 @@
+# Can't easily add license to rat-excludes file.
+.rat-excludes
+
+# Temporary user files.
+.gdb_history
+.gdb_out
+tags
+
+# Non-source files
+RELEASE_NOTES.md
+repository.yml
+.gitignore
+00readme.txt
+uncrustify.cfg
+README.md
+.mailmap
+.style_ignored_dirs
+
+# unit tests executables
+bin
+
+# CRC16 - BSD License.
+crc16.*
+
+
+# Nordic nRF5 SDK - BSD License.
+system_nrf51.c
+system_nrf52.c
+system_nrf9160.c
+gcc_startup_cm0.s
+gcc_startup_cm0_split.s
+gcc_startup_cm4.s
+gcc_startup_cm4_split.s
+gcc_startup_cm33.s
+gcc_startup_cm33_split.s
+
+
+# Linker scripts for Nordics nRF5X - TCL license
+nrf51dk_no_boot.ld
+nrf51dk-16kbram_no_boot.ld
+boot-nrf51xxaa.ld
+nrf51xxaa.ld
+boot-nrf51xxac.ld
+nrf51xxac.ld
+split-nrf51dk.ld
+boot-nrf51xxac.ld
+nrf51xxac.ld
+split-nrf51dk.ld
+nrf51.ld
+nrf52dk_no_boot.ld
+bmd300eval_no_boot.ld
+boot-nrf52xxaa.ld
+nrf52xxaa.ld
+primo_no_boot.ld
+split-primo.ld
+split-bmd300eval.ld
+split-nrf52dk.ld
+rb-nano2_no_boot.ld
+split-rb-nano2.ld
+nrf52.ld
+nrf52_ram_resident.ld
+ada_feather_nrf52_no_boot.ld
+split_ada_feather_nrf52.ld
+split-microbit.ld
+ble400_no_boot.ld
+split-ble400.ld
+nordic_pca10028_no_boot.ld
+split-nordic_pca10028.ld
+nordic_pca10028-16k_no_boot.ld
+split-nordic_pca10028-16k.ld
+nordic_pca10040_no_boot.ld
+split-nordic_pca10040.ld
+nordic_pca10056_no_boot.ld
+split-nordic_pca10056.ld
+nordic_pca20020_no_boot.ld
+split-nordic_pca20020.ld
+nrf5340.ld
+nrf5340_ram_resident.ld
+nordic_pca10095_no_boot.ld
+nrf5340_net.ld
+nrf5340_net_ram_resident.ld
+nordic_pca10095_net_no_boot.ld
+rb-blend2_no_boot.ld
+split-rb-blend2.ld
+split-telee02.ld
+telee02_no_boot.ld
+split-vbluno51.ld
+vbluno51_no_boot.ld
+split-vbluno52.ld
+vbluno52_no_boot.ld
+boot-apollo2.ld
+apollo2.ld
+dwm1001-dev_no_boot.ld
+split-dwm1001-dev.ld
+fanstel-ev-bt840_no_boot.ld
+split-fanstel-ev-bt840.ld
+puckjs_no_boot.ld
+split_puckjs.ld
+nrf91.ld
+split-nordic_pca10090.ld
+nordic_pca10090_no_boot.ld
+boot-nrf91xxaa.ld
+nordic_pca10090_no_boot.ld
+nrf91xxaa.ld
+nrf91_ram_resident.ld
+boot-pinetime.ld
+boot-apollo3.ld
+apollo3.ld
+nordic_pca10059_no_boot.ld
+split-nordic_pca10059.ld
+split-ublox_bmd_345.ld
+ublox_bmd_345_no_boot.ld
+no_boot.ld
+
+# STM32 HAL - BSD License
+stm32_driver_mod_i2c_v1.c
+stm32_driver_mod_i2c_v2.c
+stm32_driver_mod_spi.c
+stm32_driver_mod_timer.c
+
+# STM32CubeF4  - BSD License.
+stm32f4xx_hal_conf.h
+system_stm32f4xx.c
+startup_STM32F40x.s
+
+# STM32F4x MCU/BSP clock customization
+clock_stm32f4xx.c
+
+# STM32F0xx HAL - BSD licence
+clock_stm32f0xx.c
+system_stm32f0xx.c
+
+# baselibc - BSD License.
+# tinyprintf - BSD License.
+# klibc - MIT License.
+baselibc
+
+# CMSIS-CORE - BSD License.
+cmsis_nvic.c
+cmsis_nvic.h
+HAL_CM0.s
+HAL_CM3.s
+HAL_CM4.s
+HAL_CM33.s
+HAL_CM7.s
+SVC_Table.s
+
+# microjson - BSD License.
+MSJSON_COPYING
+json_decode.c
+json_encode.c
+
+# queue.h - BSD License.
+queue.h
+
+# FreeBSD - BSD License.
+os_mbuf.c
+base64.c
+
+# tinycrypt - BSD License.
+tinycrypt
+
+# frdm-k64f clock configuration - BSD License.
+clock_config.c
+clock_config.h
+
+# NXP SDK - BSD License.
+nxp-kinetis-sdk
+fsl_clock.c
+MK64FN1M0xxx12_flash.ld
+boot-MK64FN1M0xxx12_flash.ld
+startup_MK64F12.S
+MK82FN256xxx15_flash.ld
+boot-MK82FN256xxx15_flash.ld
+startup_MK82F25615.S
+MK82F25615.h
+MK82F25615_features.h
+system_MK82F25615.h
+system_MK82F25615.c
+fsl_clock.h
+fsl_ftfx_controller.c
+
+# LWIP - BSD License.
+lwip_base
+
+# OIC - BSD License.
+oic
+
+# FATFS ChaN License
+diskio.h
+ff.h
+ffconf.h
+integer.h
+ff.c
+00history.txt
+
+# Freescale Semiconductor License
+boot-mkw41z512.ld
+mkw41z512.ld
+no-boot-mkw41z512.ld
+gcc_startup_mkw41z.s
+MKW41Z4.h
+fsl_device_registers.h
+system_MKW41Z4.h
+MKW41Z4_features.h
+system_MKW41Z4.c
+
+# Imagination Technologies - BSD License
+mips-hal
+ctx.S
+excpt_isr.S
+uhi32.ld
+abiflags.S
+
+# Cygnus Support - MIT like License
+gcc_startup_mips.S
+
+# HiFive1 - Apache License 2.0
+sifive
+
+# MQTT - Eclipse Public License
+mqtt
+
+# CMSIS STM32f7 - BSD License.
+clock_stm32f7xx.c
+system_stm32f7xx.c
+
+# CMSIS Cortex-H7, STM32h7 - BSD License.
+stm32h7xx
+
+# LORA - BSD License
+lora
+
+# loraping - BSD License (main.c only)
+loraping
+
+# SEGGER Sysview - BSD License
+sysview
+
+# SEGGER RTT - BSD License
+rtt
+
+# Adafruit TSL2561 Sensor - BSD License
+tsl2561
+
+# pic32mx470f512h - BSD License
+pic32mx470f512h
+
+# STM32F7 Discovery BSP - BSD License
+stm32f7xx_hal_conf.h
+startup_stm32f746xx.s
+
+# STM32F3 Discovery BSP - BSD License
+startup_stm32f303xc.s
+
+# STM32F429 BSP - BSD License
+startup_STM32F429x.s
+
+# STM32L152C BSP - BSD License
+stm32l1xx_hal_conf.h
+startup_stm32l152xc.s
+
+# NUCLEO-H723ZG BSP - BSD License
+stm32h7xx_hal_conf.h
+system_stm32h7xx.c
+startup_stm32h723xx.s
+
+# STM32U5 - BSD License
+system_stm32u5xx.c
+clock_stm32u5xx.c
+
+# NUCLEO-U575ZI-Q BSP - BSD License
+startup_stm32u575xx.s
+stm32u5xx_hal_conf.h
+
+# NUCLEO-F767 BSP - BSD License
+startup_stm32f767xx.s
+
+# NUCLEO-F439 BSP - BSD License
+startup_stm32f439xx.s
+
+# NUCLEO-F413ZH BSP - BSD License
+startup_stm32f413xx.s
+
+# NUCLEO-L467rg BSP - BSD License
+startup_stm32l476xx.s
+stm32l4xx_hal_conf.h
+
+# NUCLEO-F072RB BSP - BSD License
+nucleo-f072rb
+
+# NUCLEO-F030R8 BSP - BSD License
+nucleo-f030r8
+
+# NUCLEO-F103RB BSP - BSD License
+stm32f1xx_hal_conf.h
+system_stm32f1xx.c
+startup_stm32f103xb.s
+
+# NUCLEO-F411RE BSP - BSD License
+startup_STM32F411.s
+
+# NUCLEO-G0B1RE BSP - BSD License
+stm32g0xx_hal_conf.h
+system_stm32g0xx.c
+clock_stm32g0xx.c
+
+# NUCLEO-G491RE BSP - BSD License
+stm32g4xx_hal_conf.h
+system_stm32g4xx.c
+clock_stm32g4xx.c
+
+# NUCLEO-WB55 BSP - BSD License
+startup_stm32wb55xx_cm4.s
+stm32wbxx_hal_conf.h
+
+# Microchip PIC32 SDK - BSD License
+pic32_init_cache.S
+pic32_init_tlb_ebi_sqi.S
+cache-err-exception.S
+cp0defs.h
+simple-tlb-refill-exception.S
+crt0.S
+p32mz_app.ld
+p32mz_boot.ld
+
+# Calliope SDK - BSD Licence
+split-calliope_mini.ld
+
+# pic32mx470_6lp_clicker BSP - one BSD licensed file (other are Apache):
+# /hw/bsp/pic32mx470_6lp_clicker/src/sbrk.c
+pic32mx470_6lp_clicker
+
+# SDK for Apollo2 - MIT/BSD/Apache License
+# hw/bsp/apollo2_evb/src/arch/cortex_m4/gcc_startup.s
+apollo2_evb
+
+# BSP for Ambiq Apollo2/Apollo3 - BSD License
+AmbiqSuite
+apollo2.h
+system_apollo2.h
+system_apollo2.c
+apollo_nvic.h
+system_apollo3.c
+apollo3.h
+system_apollo3.h
+
+# CMSIS Cortex-M4, STM32f3 - BSD License.
+clock_stm32f3xx.c
+system_stm32f3xx.c
+
+# Nucleo-F303K8, Nucleo-F303RE - BSD License.
+startup_stm32f303x8.s
+startup_stm32f303xe.s
+stm32f3xx_hal_conf.h
+
+# Ignore documentation folder
+docs
+
+# nrfX - BSD License
+nrfx_glue.h
+nrfx_config.h
+
+# stm32l1xx - BSD License
+clock_stm32l1xx.c
+system_stm32l1xx.c
+
+# stm32f1xx - BSD License
+stm32f1xx
+
+# ARC - BSD License
+arc
+embarc_emsk
+
+# olimex-p103 - BSD and APL 2.0 License
+olimex-p103
+
+# STM32L0xx SDK - BSD License
+system_stm32l0xx.c
+clock_stm32l0xx.c
+
+# STM32L4xx SDK - BSD License
+clock_stm32l4xx.c
+system_stm32l4xx.c
+
+# STM32WBxx SDK - BSD License
+clock_stm32wbxx.c
+system_stm32wbxx.c
+stm32wb55.ld
+
+# B-L072Z-LRWAN1 BSP - BSD License
+b-l072z-lrwan1
+
+# B-L475E-IOT01A BSP - BSD License
+b-l475e-iot01a
+
+# bluepill BSP - BSD License
+bluepill
+
+# Ruuvitag BSP - BSD License
+ruuvitag_rev_b
+
+# reel_board BSP - BSD License
+reel_board
+
+# Dialog DA1469x BSP - BSD and APL2 license
+dialog_da1469x-dk-pro
+da1469x
+DA1469xAB.h
+cmac.ld
+CMAC.h
+system_CMAC.h
+
+# Bosch BMP388 driver - BSD License
+bmp388
+
+# Nordic NRF5340 SDK - APL2 license
+system_nrf5340.c
+gcc_startup_nrf5340.s
+system_nrf5340_net.c
+gcc_startup_nrf5340_net.s
+
+# nucleo-l073rz BSP - BSD License
+stm32l0xx_hal_conf.h
+startup_stm32l073xx.s
+
+# MK64F12 SDK - BSD License
+MK64F12
+
+# LVGL configuration file - MIT license
+lv_conf.h

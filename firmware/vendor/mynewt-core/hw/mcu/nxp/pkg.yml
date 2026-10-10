@@ -1,0 +1,62 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+pkg.name: hw/mcu/nxp
+pkg.description: Common MCU definitions for NXP K6x series chips.
+pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
+pkg.homepage: "http://mynewt.apache.org/"
+pkg.keywords:
+    - nxp
+    - frdm-k64f
+    - MK64F12
+    - MK8xF
+
+pkg.type: sdk
+
+pkg.ign_files.BSP_MK64F12:
+    - "fsl_cache*"
+    - "fsl_flexio*"
+    - "fsl_lmem*"
+    - "fsl_ltc*"
+    - "fsl_sdramc*"
+    - "fsl_smartcard*"
+    - "fsl_tpm*"
+    - "fsl_tsi*"
+    - "fsl_lpuart*"
+    - "fsl_qspi*"
+
+pkg.ign_files.BSP_MK8XF:
+    - "fsl_uart*"
+    - "fsl_enet*"
+    - "fsl_flexcan*"
+    - "fsl_ftfx_controller.c"
+
+pkg.ign_files.BSP_MK81F:
+    - "fsl_pdb*"
+    - "fsl_sai*"
+    - "fsl_ftfx_controller.c"
+
+pkg.src_dirs.BSP_KINETIS:
+    - "src/ext/nxp-kinetis-sdk/drivers"
+
+pkg.cflags: -std=gnu99 -mthumb -Wno-error=maybe-uninitialized
+
+pkg.deps:
+    - "@apache-mynewt-core/hw/hal"
+    - "@apache-mynewt-core/hw/cmsis-core"

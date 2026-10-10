@@ -1,0 +1,220 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+syscfg.defs:
+    LV_COLOR_16_SWAP:
+        description: >
+            LV_COLOR_16_SWAP changes order of 16 bit RGB value to
+            better match 8 bit SPI protocol.
+        value: 0
+    LVGL_GC9A01:
+        description: Enable GC9A01 display driver.
+        value:
+    LVGL_ILI9341:
+        description: Enable ILI9341 display driver.
+        value:
+    LVGL_ILI9486:
+        description: Enable ILI9486 display driver.
+        value:
+    LVGL_ST7735S:
+        description: Enable ST7735S display driver.
+        value:
+    LVGL_ST7789:
+        description: Enable ST7789 display driver.
+        value:
+    LVGL_XPT2046:
+        description: Enable XPT2046 touchscreen driver.
+        value:
+    LVGL_STMPE610:
+        description: Enable STMPE610 touchscreen driver.
+        value:
+    LVGL_CST816S:
+        description: Enable CST816S touchscreen driver.
+        value:
+    LVGL_ADC_TOUCH:
+        description: Enable ADC touchscreen driver.
+        value:
+    LVGL_TRACKBALL:
+        description: Enable Trackball driver.
+        value:
+    LVGL_TIMER_PERIOD_MS:
+        description: LV timer interval for periodical refresh and touch read
+        value: 10
+    LVGL_DISPLAY_HORIZONTAL_RESOLUTION:
+        description: Default display horizontal resolution.
+        value:
+        restrictions: $notnull
+    LVGL_DISPLAY_VERTICAL_RESOLUTION:
+        description: Default display horizontal resolution.
+        value:
+        restrictions: $notnull
+
+    LVGL_DEFAULT_LV_CONF:
+        description: Add default lv_conf.h to the build.
+        value: 1
+
+    LVGL_EXAMPLES:
+        description: Add LVGL examples to build.
+        value: 1
+    LVGL_DEMOS:
+        description: Add LVGL demos to build.
+        value: 1
+
+    LV_USE_LOG:
+        description: >
+            Enable LVGL logging
+        value: 0
+    LV_LOG_LEVEL:
+        description: >
+            LVGL log level on of:
+            - LV_LOG_LEVEL_TRACE       A lot of logs to give detailed information
+            - LV_LOG_LEVEL_INFO        Log important events
+            - LV_LOG_LEVEL_WARN        Log if something unwanted happened but didn't cause a problem
+            - LV_LOG_LEVEL_ERROR       Only critical issue, when the system may fail
+            - LV_LOG_LEVEL_USER        Only logs added by the user
+            - LV_LOG_LEVEL_NONE        Do not log anything
+        value: LV_LOG_LEVEL_WARN
+    LV_LOG_PRINTF:
+        description: >
+            Use printf for writing logs.
+        value: 1
+
+    LV_FONT_DEFAULT:
+        description: Set default LVGL font.
+        value: 'lv_font_montserrat_14'
+
+    LV_FONT_MONTSERRAT_8:
+        description: Enable Montserrat 8 font.
+        value: 0
+    LV_FONT_MONTSERRAT_10:
+        description: Enable Montserrat 10 font.
+        value: 0
+    LV_FONT_MONTSERRAT_12:
+        description: Enable Montserrat 12 font.
+        value: 1
+    LV_FONT_MONTSERRAT_14:
+        description: Enable Montserrat 14 font.
+        value: 1
+    LV_FONT_MONTSERRAT_16:
+        description: Enable Montserrat 16 font.
+        value: 1
+    LV_FONT_MONTSERRAT_18:
+        description: Enable Montserrat 18 font.
+        value: 0
+    LV_FONT_MONTSERRAT_20:
+        description: Enable Montserrat 20 font.
+        value: 0
+    LV_FONT_MONTSERRAT_22:
+        description: Enable Montserrat 22 font.
+        value: 0
+    LV_FONT_MONTSERRAT_24:
+        description: Enable Montserrat 24 font.
+        value: 0
+    LV_FONT_MONTSERRAT_26:
+        description: Enable Montserrat 26 font.
+        value: 0
+    LV_FONT_MONTSERRAT_28:
+        description: Enable Montserrat 28 font.
+        value: 0
+    LV_FONT_MONTSERRAT_30:
+        description: Enable Montserrat 30 font.
+        value: 0
+    LV_FONT_MONTSERRAT_32:
+        description: Enable Montserrat 32 font.
+        value: 0
+    LV_FONT_MONTSERRAT_34:
+        description: Enable Montserrat 34 font.
+        value: 0
+    LV_FONT_MONTSERRAT_36:
+        description: Enable Montserrat 36 font.
+        value: 0
+    LV_FONT_MONTSERRAT_38:
+        description: Enable Montserrat 38 font.
+        value: 0
+    LV_FONT_MONTSERRAT_40:
+        description: Enable Montserrat 40 font.
+        value: 0
+    LV_FONT_MONTSERRAT_42:
+        description: Enable Montserrat 42 font.
+        value: 0
+    LV_FONT_MONTSERRAT_44:
+        description: Enable Montserrat 44 font.
+        value: 0
+    LV_FONT_MONTSERRAT_46:
+        description: Enable Montserrat 46 font.
+        value: 0
+    LV_FONT_MONTSERRAT_48:
+        description: Enable Montserrat 48 font.
+        value: 0
+    LV_FONT_UNSCII_8:
+        description: Enable monospace unscii 8 font.
+        value: 0
+    LV_FONT_UNSCII_16:
+        description: Enable monospace unscii 16 font.
+        value: 0
+
+    LV_USE_DEMO_FLEX_LAYOUT:
+        description: Enable Flex Layout demo.
+        value: 1
+    LV_USE_DEMO_MUSIC:
+        description: Enable Music demo.
+        value: 1
+    LV_USE_DEMO_STRESS:
+        description: Enable Stress demo.
+        value: 1
+    LV_USE_DEMO_BENCHMARK:
+        description: Enable Benchmark demo.
+        value: 1
+    LV_USE_DEMO_KEYPAD_AND_ENCODER:
+        description: Enable keypad and encoder demo.
+        value: 1
+    LV_USE_DEMO_WIDGETS:
+        description: Enable Widgets demo.
+        value: 1
+
+    LV_MEM_CUSTOM:
+        description: >
+            If set to 1 malloc/free/realloc is used by lvgl library instead of
+            lv_mem_free/lv_mem_alloc.
+        value: 0
+    LV_MEM_SIZE:
+        description: >
+            Size of the memory available for `lv_malloc()` in bytes.
+        value: 49152
+    LV_DISP_DRAW_BUF_LINES:
+        description: >
+            Number of line for buffer usd for drawing portion of the screen.
+        value: 10
+    LV_DISP_DOUBLE_BUFFER:
+        description: >
+            Enable double buffer when LCD interface has asynchronous write more.
+            It should be set to 1 one DMA is used for transferring color data to
+            display.
+        value: 0
+    LV_DISP_X_ALIGN:
+        description: >
+            Display driver X alignment requirement in bits.
+            If set to 0 display driver can draw pixels at any point.
+            If set to value grater than 0 X pixel coordinates will be rounded.
+        value: 0
+    LV_DISP_Y_ALIGN:
+        description: >
+            Display driver Y alignment requirement in bits.
+            If set to 0 display driver can draw pixels at any point.
+            If set to value grater than 0 X pixel coordinates will be rounded.
+        value: 0

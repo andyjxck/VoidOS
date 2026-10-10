@@ -1,0 +1,489 @@
+/* PineTime system HAL: RTC1 timebase, wall clock, side button, CST816S
+   touch over TWIM1, watchdog feed, diagnostics. */
+#include <string.h>
+#include "voidos/hal.h"
+#include "board.h"
+
+void display_init(void);
+void display_backlight(int level);
+void display_fill(int x0, int y0, int x1, int y1, uint16_t c);
+void sensors_init(void);
+
+/* ---- watchdog / diagnostics ---------------------------------------- */
+
+void wdt_kick(void)
+{
+    WDT_RR0 = WDT_KICK;
+}
+
+static void spin_ms(unsigned ms)
+{
+    while (ms--) {
+        wdt_kick();
+        volatile unsigned n = 4800;
+        while (n--)
+            __asm volatile("nop");
+    }
+}
+
+/* blink the backlight `pattern` times per burst for ~10 s, then reset.
+   1 = HardFault, 2 = stray IRQ, 3 = SPI timeout, 4 = I2C timeout */
+void fault_blink(int pattern)
+{
+    extern int nimble_last_stage(void);
+    extern void nimble_fault(int);
+    int st = nimble_last_stage();
+    __asm volatile("cpsid i");
+    nimble_fault(pattern);   /* survives reset in GPREGRET2 */
+    GPIO_DIRSET = BIT(PIN_BL_H);
+    for (int rep = 0; rep < 8; rep++) {
+        for (int i = 0; i < pattern; i++) {
+            GPIO_OUTCLR = BIT(PIN_BL_H);
+            spin_ms(150);
+            GPIO_OUTSET = BIT(PIN_BL_H);
+            spin_ms(150);
+        }
+        spin_ms(800);
+        /* then the stage as digits: tens blinks, gap, ones blinks */
+        if (st >= 0 && st <= 99) {
+            for (int i = 0; i < st / 10; i++) {
+                GPIO_OUTCLR = BIT(PIN_BL_H);
+                spin_ms(150);
+                GPIO_OUTSET = BIT(PIN_BL_H);
+                spin_ms(150);
+            }
+            spin_ms(500);
+            for (int i = 0; i < st % 10; i++) {
+                GPIO_OUTCLR = BIT(PIN_BL_H);
+                spin_ms(150);
+                GPIO_OUTSET = BIT(PIN_BL_H);
+                spin_ms(150);
+            }
+        }
+        spin_ms(800);
+    }
+    SCB_AIRCR = 0x05FA0004;
+    for (;;)
+        ;
+}
+
+/* ---- time ------------------------------------------------------------ */
+
+static uint32_t rtc_last;      /* last raw 24-bit counter seen */
+static uint64_t rtc_ticks;     /* monotonic 32768 Hz tick count */
+
+static uint64_t ticks_now(void)
+{
+    uint32_t c = RTC1_COUNTER & 0xFFFFFF;
+    rtc_ticks += (c - rtc_last) & 0xFFFFFF;
+    rtc_last = c;
+    return rtc_ticks;
+}
+
+static uint32_t millis_raw(void)
+{
+    return (uint32_t)(ticks_now() * 1000u / 32768u);
+}
+
+uint32_t hal_millis_raw(void) { return millis_raw(); }
+
+/* The frame is rendered in several bands; every band must see the same
+   instant or moving parts (second hand) tear between bands. main latches
+   the time once per frame via hal_frame_begin(). */
+static uint32_t frame_ms;
+static int frame_latched;
+
+void hal_frame_begin(void)
+{
+    frame_ms = millis_raw();
+    frame_latched = 1;
+}
+
+uint32_t hal_millis(void)
+{
+    return frame_latched ? frame_ms : millis_raw();
+}
+
+void hal_delay_ms(unsigned ms)
+{
+    uint32_t t0 = millis_raw();
+    while (millis_raw() - t0 < ms)
+        wdt_kick();
+}
+
+/* wall clock: seeded at boot, overwritten when the phone writes the
+   BLE Current Time characteristic (hal_clock_set). */
+static uint32_t clock_seed_ms = (10u * 3600u + 9u * 60u) * 1000u;
+static int clock_valid;
+static uint16_t clock_year;
+static uint8_t clock_mon, clock_day, clock_dow;
+
+static uint32_t wall_ms(void)
+{
+    return (clock_seed_ms + hal_millis()) % 86400000u;
+}
+
+int hal_clock_hour(void)   { return (int)(wall_ms() / 3600000u); }
+int hal_clock_minute(void) { return (int)(wall_ms() / 60000u % 60u); }
+int hal_clock_second(void) { return (int)(wall_ms() / 1000u % 60u); }
+int hal_clock_millis(void) { return (int)(wall_ms() % 1000u); }
+int hal_clock_synced(void) { return clock_valid; }
+
+void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s)
+{
+    uint32_t tod = ((uint32_t)h * 3600u + (uint32_t)mi * 60u +
+                    (uint32_t)s) * 1000u;
+    clock_seed_ms = (tod + 86400000u - hal_millis() % 86400000u) %
+                    86400000u;
+    clock_year = (uint16_t)y;
+    clock_mon = (uint8_t)mo;
+    clock_day = (uint8_t)d;
+    clock_dow = (uint8_t)dow;
+    clock_valid = 1;
+}
+
+void hal_clock_date(int *y, int *mo, int *d, int *dow)
+{
+    if (y) *y = clock_year;
+    if (mo) *mo = clock_mon;
+    if (d) *d = clock_day;
+    if (dow) *dow = clock_dow;
+}
+
+static void time_init(void)
+{
+    CLOCK_LFCLKSRC = 1;  /* external 32.768 kHz crystal */
+    CLOCK_EVENTS_LFCLKSTARTED = 0;
+    CLOCK_LFCLKSTART = 1;
+    for (unsigned spin = 0; !CLOCK_EVENTS_LFCLKSTARTED && spin < 2000000; spin++)
+        wdt_kick();
+    RTC1_PRESCALER = 0;
+    RTC1_CLEAR = 1;
+    RTC1_START = 1;
+    rtc_last = 0;
+    rtc_ticks = 0;
+}
+
+/* ---- I2C (TWIM1) ------------------------------------------------------ */
+
+static uint8_t twi_buf[16] __attribute__((aligned(4)));
+
+/* If a reset caught a slave mid-transfer it holds SDA low forever — every
+   TWIM transaction then times out waiting for bus idle. Clock SCL until
+   the slave releases SDA, then issue a STOP by hand. */
+static void twi_unstick(void)
+{
+    /* both lines as pull-up inputs: read the real bus level */
+    GPIO_PIN_CNF(PIN_SDA) = (3u << 2);
+    GPIO_PIN_CNF(PIN_SCL) = (3u << 2);
+    hal_delay_ms(1);
+    touch_diag.bus_lvl = ((GPIO_IN >> PIN_SDA) & 3);   /* SDA|1 SCL|2 */
+    if (GPIO_IN & BIT(PIN_SDA))
+        return;                                       /* bus free */
+
+    /* SCL as open-drain output; pulse up to 9 clocks */
+    GPIO_PIN_CNF(PIN_SCL) = (1u << 0) | (3u << 2) | (6u << 8);
+    GPIO_DIRSET = BIT(PIN_SCL);
+    for (int i = 0; i < 9 && !(GPIO_IN & BIT(PIN_SDA)); i++) {
+        GPIO_OUTCLR = BIT(PIN_SCL);
+        hal_delay_ms(1);
+        GPIO_OUTSET = BIT(PIN_SCL);
+        hal_delay_ms(1);
+    }
+    /* STOP condition: SDA low, raise SCL, release SDA high */
+    GPIO_PIN_CNF(PIN_SDA) = (1u << 0) | (3u << 2) | (6u << 8);
+    GPIO_DIRSET = BIT(PIN_SDA);
+    GPIO_OUTCLR = BIT(PIN_SDA);
+    hal_delay_ms(1);
+    GPIO_OUTSET = BIT(PIN_SCL);
+    hal_delay_ms(1);
+    GPIO_OUTSET = BIT(PIN_SDA);
+    hal_delay_ms(1);
+    /* re-read lines; report recovery result in high nibble */
+    GPIO_PIN_CNF(PIN_SDA) = (3u << 2);
+    GPIO_PIN_CNF(PIN_SCL) = (3u << 2);
+    hal_delay_ms(1);
+    touch_diag.bus_lvl |= (((GPIO_IN >> PIN_SDA) & 3) << 4);
+}
+
+static void twi_init(void)
+{
+    TWIM1_ENABLE = 0;
+    twi_unstick();
+    /* SDA/SCL: input, S0D1 drive, pull-up */
+    GPIO_PIN_CNF(PIN_SDA) = (3u << 2) | (6u << 8);
+    GPIO_PIN_CNF(PIN_SCL) = (3u << 2) | (6u << 8);
+    TWIM1_PSEL_SCL = PIN_SCL;
+    TWIM1_PSEL_SDA = PIN_SDA;
+    TWIM1_FREQ = 0x06400000; /* 400 kHz */
+    TWIM1_ENABLE = 6;
+}
+
+/* diagnostics, shown on-screen while bringing touch up */
+touch_diag_t touch_diag;
+unsigned touch_twim_enable(void) { return TWIM1_ENABLE; }
+
+static void twi_abort(void)
+{
+    TWIM1_EVENTS_STOPPED = 0;
+    TWIM1_STOP = 1;
+    for (unsigned spin = 0; spin < 100000 && !TWIM1_EVENTS_STOPPED; spin++)
+        ;
+    TWIM1_EVENTS_STOPPED = 0;
+}
+
+/* boot progress stripes: a colored bar per init step, top of screen.
+   The LCD holds the last frame even through a crash, so the bars that
+   appear (or don't) show exactly which step died. */
+void display_send(int x0, int y0, int x1, int y1, const uint16_t *px);
+static void imark(int row, uint16_t c)
+{
+    static uint16_t line[240];
+    for (int i = 0; i < 240; i++)
+        line[i] = c;
+    display_send(0, row * 12, 239, row * 12 + 9, line);
+}
+
+extern void nimble_stage(int);
+extern void nimble_mark(int);
+
+static int twi_wait(volatile uint32_t *ev)
+{
+    for (unsigned spin = 0; spin < 200000; spin++) {
+        if (*ev) {
+            *ev = 0;
+            touch_diag.twi_ok++;
+            return 1;
+        }
+        if (TWIM1_EVENTS_ERROR) {
+            TWIM1_EVENTS_ERROR = 0;
+            touch_diag.last_err = TWIM1_ERRORSRC;
+            TWIM1_ERRORSRC = 7;
+            touch_diag.twi_err++;
+            twi_abort();
+            return 0;
+        }
+    }
+    touch_diag.twi_timeout++;
+    twi_abort();
+    return 0;
+}
+
+/* write `reg`, then read `n` bytes; returns 1 on success */
+int i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *dst, unsigned n)
+{
+    TWIM1_ADDRESS = addr;
+    twi_buf[0] = reg;
+    TWIM1_TXD_PTR = (uint32_t)twi_buf;
+    TWIM1_TXD_MAXCNT = 1;
+    TWIM1_RXD_PTR = (uint32_t)twi_buf;
+    TWIM1_RXD_MAXCNT = n;
+    TWIM1_SHORTS = 0;   /* step the transaction by hand; diag which stalls */
+    TWIM1_EVENTS_STOPPED = 0;
+    TWIM1_EVENTS_ERROR = 0;
+    TWIM1_EVENTS_LASTTX = 0;
+    TWIM1_EVENTS_LASTRX = 0;
+    TWIM1_STARTTX = 1;
+    if (!twi_wait(&TWIM1_EVENTS_LASTTX)) { touch_diag.stall = 1; return 0; }
+    TWIM1_STARTRX = 1;
+    if (!twi_wait(&TWIM1_EVENTS_LASTRX)) { touch_diag.stall = 2; return 0; }
+    TWIM1_STOP = 1;
+    if (!twi_wait(&TWIM1_EVENTS_STOPPED)) { touch_diag.stall = 3; return 0; }
+    for (unsigned i = 0; i < n; i++)
+        dst[i] = twi_buf[i];
+    return 1;
+}
+
+int i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val)
+{
+    TWIM1_ADDRESS = addr;
+    twi_buf[0] = reg;
+    twi_buf[1] = val;
+    TWIM1_TXD_PTR = (uint32_t)twi_buf;
+    TWIM1_TXD_MAXCNT = 2;
+    TWIM1_SHORTS = 0;
+    TWIM1_EVENTS_STOPPED = 0;
+    TWIM1_EVENTS_ERROR = 0;
+    TWIM1_EVENTS_LASTTX = 0;
+    TWIM1_STARTTX = 1;
+    if (!twi_wait(&TWIM1_EVENTS_LASTTX)) { touch_diag.stall = 4; return 0; }
+    TWIM1_STOP = 1;
+    if (!twi_wait(&TWIM1_EVENTS_STOPPED)) { touch_diag.stall = 5; return 0; }
+    return 1;
+}
+
+/* ---- touch (CST816S) --------------------------------------------------- */
+
+#define CST816_ADDR 0x15
+
+static int touch_ok;
+static int touch_was_down;
+static int last_gesture;
+
+static void touch_init(void)
+{
+    imark(0, 0xFFFF);          /* white:  entered touch_init */
+    GPIO_DIRSET = BIT(PIN_TP_RESET);
+    GPIO_OUTCLR = BIT(PIN_TP_RESET);
+    hal_delay_ms(20);
+    GPIO_OUTSET = BIT(PIN_TP_RESET);
+    hal_delay_ms(200);
+    imark(1, 0xF800);          /* red:    reset released */
+
+    /* wake it (first transaction after reset is often NAKed) */
+    uint8_t dummy;
+    i2c_read_reg(CST816_ADDR, 0x15, &dummy, 1);
+    hal_delay_ms(5);
+    imark(2, 0xFD20);          /* orange: wake read done */
+    /* explicit exit-sleep in case a previous firmware left it asleep */
+    i2c_write_reg(CST816_ADDR, 0xA5, 0x00);
+    hal_delay_ms(5);
+    imark(3, 0xFFE0);          /* yellow: sleep-exit write done */
+    /* bus scan: which I2C devices actually ACK (diagnostic). One green
+       stripe per 8 probed addresses — the count of bars shows where a
+       probe kills the bus, and the stage register holds the address. */
+    for (int a = 0x08; a < 0x78; a++) {
+        if ((a & 7) == 0)
+            imark(4 + (a >> 3), 0x07E0);
+        nimble_stage(a);
+        uint8_t b;
+        if (i2c_read_reg(a, 0x00, &b, 1) && touch_diag.scan_count < 8)
+            touch_diag.scan[touch_diag.scan_count++] = (uint8_t)a;
+    }
+    nimble_stage(79);
+    imark(4, 0x07E0);          /* green:  bus scan done */
+    /* motion mask: continuous left/right + double-click (as InfiniTime) */
+    i2c_write_reg(CST816_ADDR, 0xEC, 0x05);
+    /* IRQ control: pulse INT on touch, on touch-state change, on gesture.
+       Without this the controller stays silent for plain taps/drags. */
+    i2c_write_reg(CST816_ADDR, 0xFA, 0x70);
+    /* disable the 5s no-gesture auto-reset (it kills mid-swipe touches) */
+    i2c_write_reg(CST816_ADDR, 0xFB, 0x00);
+    imark(5, 0x07FF);          /* cyan:   config writes done */
+    /* input, pull-up, SENSE low; with DETECTMODE=LDETECT the LATCH bit
+       captures the controller's short INT pulse until we clear it */
+    GPIO_PIN_CNF(PIN_TP_INT) = (3u << 2) | (3u << 16);
+    GPIO_DETECTMODE = 1;
+    GPIO_LATCH = BIT(PIN_TP_INT);
+    imark(6, 0x001F);          /* blue:   int gpio configured */
+    /* even if the ID read fails, keep polling: the bus may just be slow
+       to wake and reads fail gracefully */
+    uint8_t id[3] = {0, 0, 0};
+    if (i2c_read_reg(CST816_ADDR, 0xA7, id, 3))
+        touch_diag.chip_id = id[0] | (id[1] << 8) | (id[2] << 16);
+    /* drain whatever touch state the controller latched during power-on */
+    i2c_read_reg(CST816_ADDR, 0x00, id, 3);
+    (void)hal_millis_raw;
+    touch_ok = 1;
+    imark(7, 0xF81F);          /* magenta: touch_init complete */
+}
+
+/* ---- button ------------------------------------------------------------ */
+
+static int btn_was_down;
+static uint32_t btn_down_ms;
+
+static void button_init(void)
+{
+    GPIO_DIRSET = BIT(PIN_BTN_OUT);
+    GPIO_OUTSET = BIT(PIN_BTN_OUT);
+    GPIO_PIN_CNF(PIN_BTN_IN) = (1u << 2); /* input, pull-down */
+}
+
+/* ---- touch sampling ------------------------------------------------------ */
+
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+/* One raw sample for LVGL's pointer indev: 1 if a finger is on the glass,
+   x/y holding the position. LVGL derives taps/swipes itself. */
+int touch_sample(int *x, int *y)
+{
+    if (!touch_ok)
+        return 0;
+    uint8_t d[7];
+    if (!i2c_read_reg(CST816_ADDR, 0x00, d, 7)) {
+        *x = touch_diag.last_x;
+        *y = touch_diag.last_y;
+        return touch_was_down;
+    }
+    /* Gesture IDs persist in d[1] forever; the INT latch marks fresh
+       pulses. Use both: a changed nonzero ID = new gesture even if the
+       latch missed the pulse. Re-arm on finger-up so repeats re-fire. */
+    int fresh = (GPIO_LATCH & BIT(PIN_TP_INT)) != 0;
+    GPIO_LATCH = BIT(PIN_TP_INT);
+    if (fresh)
+        touch_diag.latches++;
+    int fingers = d[2] & 0x0F;
+    int event = d[3] >> 6;
+    *x = clampi(((d[3] & 0x0F) << 8) | d[4], 0, VOIDOS_WIDTH - 1);
+    *y = clampi(((d[5] & 0x0F) << 8) | d[6], 0, VOIDOS_HEIGHT - 1);
+    touch_diag.reads++;
+    touch_diag.last_x = *x;
+    touch_diag.last_y = *y;
+    touch_diag.last_fingers = fingers;
+    touch_diag.last_event = d[1];
+    memcpy(touch_diag.raw, d, 6);
+    static uint8_t prev_gest;
+    if (fingers == 0 || event == 1)
+        prev_gest = 0;                       /* released: re-arm */
+    if (d[1] && (d[1] != prev_gest || fresh)) {
+        last_gesture = d[1];                 /* CST816S gesture ID */
+        prev_gest = d[1];
+    }
+    touch_was_down = (fingers != 0 && event != 1);
+    return touch_was_down;
+}
+
+/* CST816S gesture register (0x01): 1=up 2=down 3=left 4=right 5=dbl-click
+   0x0B=long-press 0x0C=single-click. Returns and clears the latest ID. */
+int touch_gesture(void)
+{
+    int g = last_gesture;
+    last_gesture = 0;
+    return g;
+}
+
+/* ---- HAL entry points --------------------------------------------------- */
+
+int hal_init(void)
+{
+    /* instruction cache is off out of reset — flash code runs ~2x slower */
+    *(volatile uint32_t *)0x4001E540 = 1;   /* NVMC->ICACHECNF */
+    GPIO_DIRSET = BIT(PIN_BL_H);            /* earliest possible sign of life */
+    GPIO_OUTCLR = BIT(PIN_BL_H);            /* backlight on (active low) */
+    time_init();
+    button_init();
+    nimble_stage(80);
+    display_init();
+    display_backlight(3);      /* on early so init stripes are visible */
+    twi_init();
+    touch_init();
+    imark(9, 0x8410);          /* grey:  hal i2c init complete */
+    sensors_init();
+    nimble_stage(84);
+    display_backlight(3);
+    return 1;
+}
+
+void hal_shutdown(void) {}
+
+void hal_present(void) {}
+
+/* button state: 0 released, else ms held; >=3000 triggers the revert reset */
+uint32_t button_held_ms(void)
+{
+    static uint32_t last_now;
+    uint32_t now = millis_raw();
+    int btn = (GPIO_IN & BIT(PIN_BTN_IN)) != 0;
+    if (btn && !btn_was_down) {
+        btn_was_down = 1;
+        btn_down_ms = now;
+    } else if (!btn) {
+        btn_was_down = 0;
+    }
+    last_now = now;
+    (void)last_now;
+    return btn ? now - btn_down_ms : 0;
+}
+
+int hal_poll_event(hal_event_t *ev) { (void)ev; return 0; }

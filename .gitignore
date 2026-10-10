@@ -1,0 +1,17 @@
+# build outputs
+build/
+*.o
+
+# firmware image artifacts
+firmware/voidos-app.out
+firmware/voidos-app.bin
+firmware/voidos-app-image.bin
+firmware/voidos-app.map
+firmware/voidos-dfu-*.zip
+
+# generated sources
+firmware/gen/
+firmware/nimble_port/include/syscfg/syscfg.h
+
+# macOS
+.DS_Store
