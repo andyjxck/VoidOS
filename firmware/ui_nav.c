@@ -178,8 +178,9 @@ static void back_cb(lv_event_t *e)
     nav_to(back_target);
 }
 
-/* cst: 1=up 2=down 3=left 4=right — control centre sits above the face
-   (swipe up reveals it), apps sit below (swipe down), right goes back */
+/* CST816S gesture register IDs (as InfiniTime's Cst816s.h): 1=down
+   2=up 3=left 4=right — the control centre sits above the face (pull
+   down to reveal it), apps sit below (pull up), right goes back */
 static void dir_nav(int cst_dir)
 {
     if (water_lock)
@@ -208,22 +209,6 @@ void ui_swipe(int cst_dir)
 {
     last_swipe_ms = hal_millis();
     dir_nav(cst_dir);
-}
-
-static void gesture_cb(lv_event_t *e)
-{
-    (void)e;
-    lv_indev_t *indev = lv_indev_active();
-    if (!indev)
-        return;
-    static const int cst[5] = {0, 1, 2, 3, 4};
-    lv_dir_t d = lv_indev_get_gesture_dir(indev);
-    int c = (d == LV_DIR_TOP)    ? cst[1] :
-            (d == LV_DIR_BOTTOM) ? cst[2] :
-            (d == LV_DIR_LEFT)   ? cst[3] :
-            (d == LV_DIR_RIGHT)  ? cst[4] : 0;
-    if (c)
-        dir_nav(c);
 }
 
 static uint32_t ui_start_ms;
@@ -344,8 +329,8 @@ static void build_cc(lv_obj_t *r)
 
     mk_label(r, &kenney9, C_MUTED, 176, 30, "SUN");
     lv_obj_t *sl = lv_slider_create(r);
-    lv_obj_set_pos(sl, 214, 40);
-    lv_obj_set_size(sl, 12, 160);
+    lv_obj_set_pos(sl, 216, 40);
+    lv_obj_set_size(sl, 18, 160);
     lv_slider_set_range(sl, 0, 100);
     lv_slider_set_value(sl, brightness, LV_ANIM_OFF);
     lv_obj_add_event_cb(sl, cc_cb, LV_EVENT_VALUE_CHANGED, (void *)1);
@@ -355,11 +340,11 @@ static void build_cc(lv_obj_t *r)
         if ((i == 3 && (cc_hide & 1)) || (i == 4 && (cc_hide & 4)) ||
             (i == 5 && (cc_hide & 2)))
             continue;
-        int x = 42 + (i % 3) * 70, y = 66 + (i / 3) * 70;
+        int x = 44 + (i % 3) * 66, y = 66 + (i / 3) * 70;
         int on = (i == 0) ? dnd_on : (i == 1) ? airplane_on :
                  (i == 2) ? bt_on : (i == 3) ? torch_on :
                  (i == 4) ? ble_connected() : (i == 5) ? water_lock : 0;
-        lv_obj_t *b = mk_btn(r, tt[i], x - 29, y - 29, 58, 58,
+        lv_obj_t *b = mk_btn(r, tt[i], x - 31, y - 31, 62, 62,
                              on ? C_ACCENT : C_FILL, cc_cb);
         lv_obj_set_style_radius(b, 18, 0);
         lv_obj_t *txt = lv_obj_get_child(b, 0);
@@ -788,7 +773,10 @@ void ui_init(void)
     lv_obj_set_style_border_width(root, 0, 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(root, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(root, gesture_cb, LV_EVENT_GESTURE, NULL);
+    /* no LV_EVENT_GESTURE handler: the CST816S detects gestures in
+       hardware (ui_swipe). LVGL's own detection used to run too and
+       re-navigated on an inverted direction map — every swipe down
+       bounced the control centre straight back to the face */
     lv_obj_add_event_cb(root, tap_cb, LV_EVENT_CLICKED, NULL);
     display_backlight(3);
     last_input_ms = hal_millis();

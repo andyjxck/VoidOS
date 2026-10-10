@@ -161,9 +161,13 @@ void ui_face_build(lv_obj_t *scr)
     lbl_tag = label(scr, &kenney9, 0x8890A0, 46, 208, 72, "");
     lv_obj_set_style_text_align(lbl_tag, LV_TEXT_ALIGN_LEFT, 0);
 
-    /* steps card */
+    /* steps card: value + tag, same layout as the HR card. The old
+       "STEPS n" string overflowed the card past 9,999 and clipped
+       against its right edge */
     card(scr, 122, 182, 104, 40);
-    lbl_steps = label(scr, &kenney16, 0xFFFFFF, 126, 194, 96, "--");
+    lbl_steps = label(scr, &kenney16, 0xFFFFFF, 130, 190, 88, "--");
+    lv_obj_set_style_text_align(lbl_steps, LV_TEXT_ALIGN_LEFT, 0);
+    label(scr, &kenney9, 0x8890A0, 130, 206, 80, "STEPS");
 
     lbl_date = label(scr, &kenney9, 0x59647B, 60, 226, 120, "TIME UNSYNCED");
     lbl_diag = label(scr, &kenney16, 0xFF8040, 4, 2, 232, "");
@@ -253,9 +257,9 @@ void ui_face_tick(void)
     int steps = sensors_steps();
     if (steps != last_steps) {
         if (steps >= 0)
-            lv_snprintf(buf, sizeof buf, "STEPS %d", steps);
+            lv_snprintf(buf, sizeof buf, "%d", steps);
         else
-            lv_snprintf(buf, sizeof buf, "STEPS --");
+            lv_snprintf(buf, sizeof buf, "--");
         lv_label_set_text(lbl_steps, buf);
         last_steps = steps;
     }
