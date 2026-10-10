@@ -63,10 +63,79 @@ static int sw_running;
 static uint32_t sw_t0, sw_acc;
 static uint32_t timer_end_ms;
 static int timer_done;
+static uint32_t motor_off_at;
 static int alarm_on = 1;
 
 /* navigation */
 static scr_t back_target = SCR_FACE;
+
+/* ---- persistence: settings + step history on external SPI flash ---- */
+void spi_flash_init(void);
+void spi_flash_read(uint32_t, uint8_t *, unsigned);
+void spi_flash_write(uint32_t, const uint8_t *, unsigned);
+void spi_flash_sector_erase(uint32_t);
+int sensors_steps(void);
+int sensors_wrist_raise(void);
+int hal_battery_pct(void);
+void hal_motor(int);
+
+#define PERSIST_ADDR 0x3F0000u   /* top sector, clear of the DFU region */
+struct persist {
+    uint32_t magic;              /* 0x564F4944 = "VOID" */
+    uint8_t ver;
+    uint8_t brightness, dnd, airplane, water_lock, bt_on;
+    uint8_t cc_hide, water_ml, alarm_on;
+    uint32_t steps_total, chip_at_save;
+};
+static struct persist P;
+
+int ui_steps(void)
+{
+    int chip = sensors_steps();
+    if (chip < 0)
+        return -1;
+    uint32_t c = (uint32_t)chip;
+    uint32_t tot = P.steps_total;
+    tot += c >= P.chip_at_save ? c - P.chip_at_save : c;
+    return (int)tot;
+}
+
+static void persist_save(void)
+{
+    P.magic = 0x564F4944u;
+    P.ver = 1;
+    P.brightness = (uint8_t)brightness;
+    P.dnd = (uint8_t)dnd_on;
+    P.airplane = (uint8_t)airplane_on;
+    P.water_lock = (uint8_t)water_lock;
+    P.bt_on = (uint8_t)bt_on;
+    P.cc_hide = (uint8_t)cc_hide;
+    P.water_ml = (uint8_t)(water_ml / 250);
+    P.alarm_on = (uint8_t)alarm_on;
+    P.steps_total = (uint32_t)ui_steps();
+    P.chip_at_save = (uint32_t)sensors_steps();
+    spi_flash_init();
+    spi_flash_sector_erase(PERSIST_ADDR);
+    spi_flash_write(PERSIST_ADDR, (const uint8_t *)&P, sizeof P);
+}
+
+static void persist_load(void)
+{
+    spi_flash_init();
+    spi_flash_read(PERSIST_ADDR, (uint8_t *)&P, sizeof P);
+    if (P.magic != 0x564F4944u || P.ver != 1) {
+        memset(&P, 0, sizeof P);
+        return;
+    }
+    brightness = P.brightness;
+    dnd_on = P.dnd;
+    airplane_on = P.airplane;
+    water_lock = P.water_lock;
+    bt_on = P.bt_on;
+    cc_hide = P.cc_hide;
+    water_ml = P.water_ml * 250;
+    alarm_on = P.alarm_on;
+}
 
 /* ---- helpers ------------------------------------------------------------ */
 
@@ -339,6 +408,12 @@ static void build_cc(lv_obj_t *r)
     lv_slider_set_range(sl, 0, 100);
     lv_slider_set_value(sl, brightness, LV_ANIM_OFF);
     lv_obj_add_event_cb(sl, cc_cb, LV_EVENT_VALUE_CHANGED, (void *)1);
+
+    {
+        char bb[8];
+        lv_snprintf(bb, sizeof bb, "%d%%", hal_battery_pct());
+        mk_label_c(r, &kenney9, C_MUTED, 214, 32, bb);
+    }
 
     static const char *tt[6] = {"DND", "AIR", "BT", "TORCH", "PHONE", "LOCK"};
     for (int i = 0; i < 6; i++) {
@@ -767,6 +842,7 @@ static void settings_cb(lv_event_t *e)
         return;
     }
     rebuild();
+    persist_save();
 }
 
 /* ---- stats ------------------------------------------------------------------- */
@@ -776,7 +852,7 @@ static void build_stats(lv_obj_t *r)
     page_bg(r);
     mk_header(r, "STATS", 1);
     char buf[32];
-    int steps = sensors_steps();
+    int steps = ui_steps();
     lv_snprintf(buf, sizeof buf, "STEPS  %s", steps >= 0 ? "" : "--");
     if (steps >= 0)
         lv_snprintf(buf, sizeof buf, "STEPS  %d", steps);
@@ -797,7 +873,8 @@ static void build_stats(lv_obj_t *r)
         mk_label_c(r, &kenney9, C_WARN, 120, 214, "HR SENSOR OFFLINE");
     int s, ac, rc, ge, at;
     ble_diag(&s, &ac, &rc, &ge, &at);
-    lv_snprintf(buf, sizeof buf, "BLE S%d A%d E%d", s, ac, rc);
+    lv_snprintf(buf, sizeof buf, "BLE S%d A%d E%d BAT %d%%", s, ac, rc,
+                hal_battery_pct());
     mk_label_c(r, &kenney9, C_MUTED, 120, 172, buf);
     lv_snprintf(buf, sizeof buf, "TCH R%u F%d E%d", touch_diag.reads,
                 touch_diag.last_fingers, touch_diag.last_event);
@@ -841,6 +918,9 @@ void ui_init(void)
        re-navigated on an inverted direction map — every swipe down
        bounced the control centre straight back to the face */
     lv_obj_add_event_cb(root, tap_cb, LV_EVENT_CLICKED, NULL);
+    persist_load();
+    if (!bt_on)
+        ble_set_enabled(0);
     display_backlight(3);
     last_input_ms = hal_millis();
     nav_to(SCR_FACE);
@@ -854,33 +934,17 @@ void ui_tick(void)
     if (!ui_start_ms)
         ui_start_ms = now;   /* first loop iter, after ble_init's boot marks */
     extern int ble_dfu_busy(void);
-    static uint32_t sleep_at;
-    static int sleep_az, wake_streak;
     /* idle -> screen off (never mid-DFU) */
     if (!asleep && last_input_ms && now - last_input_ms > SLEEP_AFTER_MS &&
         !ble_dfu_busy()) {
         asleep = 1;
         display_backlight(0);
-        sleep_at = now;
-        wake_streak = 0;
+        persist_save();
     }
-    /* raise-to-wake: a real raise ends in a sustained new orientation
-       (~40°+ of Z-axis tilt); momentary wrist jiggle doesn't. Track the
-       baseline for the first second after sleep so it's captured with
-       the watch settled, then require the delta to persist. */
-    if (asleep) {
-        if (now - sleep_at < 1200) {
-            sleep_az = sensors_bma_z();
-        } else {
-            int dz = sensors_bma_z() - sleep_az;
-            if (dz > 700 || dz < -700) {
-                if (++wake_streak > 40)
-                    ui_wake();
-            } else {
-                wake_streak = 0;
-            }
-        }
-    }
+    /* raise-to-wake: the BMA425 feature engine detects the gesture
+       on-chip and flags INT_STAT_1 bit3 — self-debounced, no tilt maths */
+    if (asleep && sensors_wrist_raise())
+        ui_wake();
     /* side button as nav fallback while touch is unreliable: a release
        before the 3 s reset threshold steps through screens */
     static int was_held;
@@ -904,8 +968,16 @@ void ui_tick(void)
     if (timer_end_ms && now >= timer_end_ms) {
         timer_end_ms = 0;
         timer_done = 1;
+        hal_motor(1);
+        motor_off_at = now + 400;
+        if (asleep)
+            ui_wake();
         if (cur == SCR_CLOCK)
             rebuild();
+    }
+    if (motor_off_at && now >= motor_off_at) {
+        motor_off_at = 0;
+        hal_motor(0);
     }
     switch (cur) {
     case SCR_FACE:

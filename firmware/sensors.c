@@ -58,10 +58,12 @@ static void bma_init(void)
     uint8_t stat = 0;
     i2c_read_reg(BMA_ADDR, 0x2A, &stat, 1);   /* INTERNAL_STAT */
     if ((stat & 0x0F) == 0x01) {              /* ASIC_INITIALIZED */
-        /* enable the on-chip step counter: feature byte 0x3B bit4 */
+        /* enable on-chip features: byte 0x3B bit4 = step counter,
+           byte 0x40 bit0 = wrist-wear (raise gesture) */
         uint8_t feat[70];
         if (i2c_read_reg(BMA_ADDR, 0x5E, feat, 70)) {
             feat[0x3B] |= 0x10;
+            feat[0x40] |= 0x01;
             if (i2c_write_regs(BMA_ADDR, 0x5E, feat, 70))
                 bma_engine = 1;
         }
@@ -400,6 +402,18 @@ void sensors_tick(uint32_t now)
 int sensors_bma_ok(void)  { return bma_ok; }
 int sensors_bma_z(void)   { return bma_ok ? az : 0; }
 int sensors_bma_activity(void) { return bma_ok ? (int)act_delta : 0; }
+
+/* wrist-raise gesture from the feature engine: INT_STAT_1 bit3,
+   clears on read — 1 when the engine flagged a raise since last poll */
+int sensors_wrist_raise(void)
+{
+    if (!bma_engine)
+        return 0;
+    uint8_t v = 0;
+    if (!i2c_read_reg(BMA_ADDR, 0x1D, &v, 1))
+        return 0;
+    return (v & 0x08) ? 1 : 0;
+}
 int sensors_hrs_ok(void)  { return hrs_ok; }
 int sensors_hrs_raw(void)   { return (int)hrs_raw; }
 int sensors_hrs_ac(void)    { return (int)win_max; }

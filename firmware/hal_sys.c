@@ -150,6 +150,75 @@ void hal_clock_date(int *y, int *mo, int *d, int *dow)
     if (dow) *dow = clock_dow;
 }
 
+/* vibration motor, GPIO P0.16 */
+void hal_motor(int on)
+{
+    static int configured;
+    if (!configured) {
+        GPIO_DIRSET = 1u << PIN_VIBRA;
+        GPIO_OUTCLR = 1u << PIN_VIBRA;
+        configured = 1;
+    }
+    if (on)
+        GPIO_OUTSET = 1u << PIN_VIBRA;
+    else
+        GPIO_OUTCLR = 1u << PIN_VIBRA;
+}
+
+/* battery voltage on P0.31 (AIN7) through the 2:1 divider */
+#define SAADC_BASE      0x40007000u
+#define SAADC_START     REG32(SAADC_BASE + 0x000)
+#define SAADC_SAMPLE    REG32(SAADC_BASE + 0x004)
+#define SAADC_EVENTS_END REG32(SAADC_BASE + 0x108)
+#define SAADC_BUSY      REG32(SAADC_BASE + 0x400)
+#define SAADC_ENABLE    REG32(SAADC_BASE + 0x500)
+#define SAADC_CH0_PSELP REG32(SAADC_BASE + 0x510)
+#define SAADC_CH0_PSELN REG32(SAADC_BASE + 0x514)
+#define SAADC_CH0_CONF  REG32(SAADC_BASE + 0x518)
+#define SAADC_RESOL     REG32(SAADC_BASE + 0x5F0)
+#define SAADC_RES_PTR   REG32(SAADC_BASE + 0x62C)
+#define SAADC_RES_MAX   REG32(SAADC_BASE + 0x630)
+
+int hal_battery_pct(void)
+{
+    /* piecewise lipo curve (voltage -> %), matches the usual
+       PineTime discharge profile closely enough for a gauge */
+    static const uint16_t curve[][2] = {
+        {3500, 0},  {3620, 5},  {3690, 10}, {3710, 15}, {3730, 20},
+        {3770, 30}, {3800, 40}, {3820, 50}, {3870, 60}, {3920, 70},
+        {3980, 80}, {4060, 90}, {4150, 100}
+    };
+    static int16_t result[4];
+    SAADC_ENABLE = 1;
+    SAADC_CH0_PSELP = 7;            /* AIN7 */
+    SAADC_CH0_PSELN = 0;
+    SAADC_CH0_CONF = (3 << 16);     /* 10us acq, 1/6 gain, internal ref */
+    SAADC_RESOL = 2;                /* 12 bit */
+    SAADC_RES_PTR = (uint32_t)result;
+    SAADC_RES_MAX = 1;
+    SAADC_EVENTS_END = 0;
+    SAADC_START = 1;
+    SAADC_SAMPLE = 1;
+    for (unsigned spin = 0; !SAADC_EVENTS_END && spin < 200000; spin++)
+        ;
+    SAADC_ENABLE = 0;
+    int raw = result[0];
+    if (raw < 0) raw = 0;
+    /* raw/4096 * 3.6V * 6(gain) * 2(divider) -> millivolts */
+    uint32_t mv = (uint32_t)raw * 3600u * 12u / 4096u;
+    if (mv <= curve[0][0])
+        return 0;
+    for (int i = 1; i < 13; i++) {
+        if (mv <= curve[i][0]) {
+            uint32_t dv = curve[i][0] - curve[i - 1][0];
+            uint32_t dp = curve[i][1] - curve[i - 1][1];
+            return (int)(curve[i - 1][1] +
+                         (mv - curve[i - 1][0]) * dp / dv);
+        }
+    }
+    return 100;
+}
+
 static void time_init(void)
 {
     CLOCK_LFCLKSRC = 1;  /* external 32.768 kHz crystal */

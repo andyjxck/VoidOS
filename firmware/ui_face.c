@@ -5,7 +5,7 @@
 
 extern const lv_font_t kenney9, kenney16, kenney24, kenney56;
 int sensors_bpm(void);
-int sensors_steps(void);
+int ui_steps(void);
 int sensors_ppg(int i, int *out_y100);
 int sensors_hrs_ok(void);
 int hal_clock_synced(void);
@@ -42,47 +42,79 @@ static void draw_line(lv_layer_t *layer, int x0, int y0, int x1, int y1,
     lv_draw_line(layer, &dsc);
 }
 
-/* hand helper: angle in degrees, 0 = 12 o'clock */
+/* tapered hand: filled triangle pivot->tip plus a short tail */
 static void hand(lv_layer_t *layer, float deg, int len, int tail,
-                 int width, uint32_t color)
+                 int base_w, uint32_t color)
 {
     float a = (deg - 90.0f) * 0.0174533f;
-    int x1 = CX + (int)(cosf(a) * len);
-    int y1 = CY + (int)(sinf(a) * len);
-    int x0 = CX - (int)(cosf(a) * tail);
-    int y0 = CY - (int)(sinf(a) * tail);
-    draw_line(layer, x0, y0, x1, y1, lv_color_hex(color), width, 1);
+    float dx = cosf(a), dy = sinf(a);
+    lv_draw_triangle_dsc_t dsc;
+    lv_draw_triangle_dsc_init(&dsc);
+    dsc.color = lv_color_hex(color);
+    dsc.p[0].x = CX + (int)(dx * len);
+    dsc.p[0].y = CY + (int)(dy * len);
+    dsc.p[1].x = CX - (int)(dy * base_w);
+    dsc.p[1].y = CY + (int)(dx * base_w);
+    dsc.p[2].x = CX + (int)(dy * base_w);
+    dsc.p[2].y = CY - (int)(dx * base_w);
+    lv_draw_triangle(layer, &dsc);
+    if (tail)
+        draw_line(layer, CX, CY, CX - (int)(dx * tail),
+                  CY - (int)(dy * tail), lv_color_hex(color), 4, 1);
 }
 
 static void dial_draw(lv_event_t *ev)
 {
     lv_layer_t *layer = lv_event_get_layer(ev);
+    lv_draw_fill_dsc_t fill;
+    lv_draw_fill_dsc_init(&fill);
 
-    /* ticks out to the bezel edge: thin dim minutes, long bright hours */
+    /* VoidOS signature: teal arc chasing the seconds around the rim */
+    int s = hal_clock_second();
+    int ms = hal_clock_millis();
+    float sweep = (s + ms / 1000.0f) * 6.0f;   /* degrees, 0 = 12 */
+    lv_draw_arc_dsc_t arc;
+    lv_draw_arc_dsc_init(&arc);
+    arc.center.x = CX;
+    arc.center.y = CY;
+    arc.radius = 114;
+    arc.width = 3;
+    arc.color = lv_color_hex(0x5AC8D2);
+    arc.start_angle = -90;
+    arc.end_angle = -90 + (int32_t)sweep;
+    arc.rounded = 1;
+    lv_draw_arc(layer, &arc);
+
+    /* indices: rounded squares at hours (ours, not PineTime's sticks),
+       dim dots for the other minute positions */
     for (int i = 0; i < 60; i++) {
         float a = i * 6.0f * 0.0174533f - 1.5707963f;
-        int hour_tick = i % 5 == 0;
-        int r1 = hour_tick ? 98 : 109;
-        draw_line(layer,
-                  CX + (int)(cosf(a) * r1), CY + (int)(sinf(a) * r1),
-                  CX + (int)(cosf(a) * 118), CY + (int)(sinf(a) * 118),
-                  lv_color_hex(hour_tick ? 0xB8C4D8 : 0x2A3344),
-                  hour_tick ? 4 : 2, hour_tick);
+        int ix = CX + (int)(cosf(a) * 102);
+        int iy = CY + (int)(sinf(a) * 102);
+        if (i % 5 == 0) {
+            lv_area_t sq = {ix - 4, iy - 4, ix + 4, iy + 4};
+            fill.color = lv_color_hex(0xB8C4D8);
+            fill.radius = 3;
+            lv_draw_fill(layer, &fill, &sq);
+        } else {
+            int mx = CX + (int)(cosf(a) * 110);
+            int my = CY + (int)(sinf(a) * 110);
+            lv_area_t dot = {mx - 1, my - 1, mx + 1, my + 1};
+            fill.color = lv_color_hex(0x2A3344);
+            fill.radius = 1;
+            lv_draw_fill(layer, &fill, &dot);
+        }
     }
 
     int h = hal_clock_hour() % 12;
     int m = hal_clock_minute();
-    int s = hal_clock_second();
-    int ms = hal_clock_millis();
 
     /* second behind, then minute, then hour on top */
-    hand(layer, (s + ms / 1000.0f) * 6.0f, 92, 18, 2, 0x5AC8D2);
-    hand(layer, (m + s / 60.0f) * 6.0f, 84, 12, 6, 0xEAF0F8);
-    hand(layer, (h + m / 60.0f) * 30.0f, 56, 12, 9, 0xFFFFFF);
+    hand(layer, sweep, 88, 18, 2, 0x5AC8D2);
+    hand(layer, (m + s / 60.0f) * 6.0f, 76, 12, 5, 0xD8E0EC);
+    hand(layer, (h + m / 60.0f) * 30.0f, 52, 12, 7, 0xFFFFFF);
 
     /* pivot cap */
-    lv_draw_fill_dsc_t fill;
-    lv_draw_fill_dsc_init(&fill);
     lv_area_t cap = {CX - 7, CY - 7, CX + 7, CY + 7};
     fill.color = lv_color_hex(0x5AC8D2);
     fill.radius = 7;
@@ -171,15 +203,14 @@ void ui_face_build(lv_obj_t *scr)
     lv_obj_remove_flag(dial_obj, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(dial_obj, dial_draw, LV_EVENT_DRAW_MAIN, NULL);
 
-    /* hour numerals at r=80; 3 replaced by the date window */
-    for (int i = 1; i <= 12; i++) {
-        if (i == 3)
-            continue;
-        float a = i * 30.0f * 0.0174533f - 1.5707963f;
+    /* numerals at 12/6/9 only — minimal, ours */
+    static const int quads[3] = {12, 6, 9};
+    for (int i = 0; i < 3; i++) {
+        float a = quads[i] * 30.0f * 0.0174533f - 1.5707963f;
         int x = CX + (int)(cosf(a) * 80) - 14;
         int y = CY + (int)(sinf(a) * 80) - 10;
         char num[3];
-        lv_snprintf(num, sizeof num, "%d", i);
+        lv_snprintf(num, sizeof num, "%d", quads[i]);
         label(scr, &kenney16, 0xD8E0EC, x, y, 28, num);
     }
 
@@ -213,7 +244,7 @@ void ui_face_tick(void)
         lv_label_set_text(lbl_bpm, bpm > 0 ? buf : "--");
         last_bpm = bpm;
     }
-    int steps = sensors_steps();
+    int steps = ui_steps();
     if (steps != last_steps) {
         lv_snprintf(buf, sizeof buf, "STEPS %d", steps >= 0 ? steps : 0);
         lv_label_set_text(lbl_steps, buf);
