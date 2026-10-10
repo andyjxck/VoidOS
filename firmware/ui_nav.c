@@ -64,6 +64,7 @@ static uint32_t sw_t0, sw_acc;
 static uint32_t timer_end_ms;
 static int timer_done;
 static uint32_t motor_off_at;
+static lv_obj_t *stats_trace;
 static int alarm_on = 1;
 
 /* navigation */
@@ -76,6 +77,7 @@ void spi_flash_write(uint32_t, const uint8_t *, unsigned);
 void spi_flash_sector_erase(uint32_t);
 int sensors_steps(void);
 int sensors_wrist_raise(void);
+int sensors_ppg(int i, int *out_y100);
 int hal_battery_pct(void);
 void hal_motor(int);
 
@@ -847,6 +849,34 @@ static void settings_cb(lv_event_t *e)
 
 /* ---- stats ------------------------------------------------------------------- */
 
+static void ppg_draw(lv_event_t *ev)
+{
+    lv_layer_t *layer = lv_event_get_layer(ev);
+    lv_area_t area;
+    lv_obj_get_coords(lv_event_get_target(ev), &area);
+    int x0 = area.x1, x1 = area.x2;
+    int mid = (area.y1 + area.y2) / 2;
+    int half = (area.y2 - area.y1) / 2 - 2;
+    int y100;
+    if (!sensors_ppg(0, &y100))
+        return;
+    lv_draw_line_dsc_t dsc;
+    lv_draw_line_dsc_init(&dsc);
+    dsc.color = lv_color_hex(0x5AC8D2);
+    dsc.width = 2;
+    int prev_y = mid - y100 * half / 100;
+    for (int x = x0 + 1; x <= x1; x++) {
+        sensors_ppg((x - x0) * 128 / (x1 - x0), &y100);
+        int y = mid - y100 * half / 100;
+        dsc.p1.x = x - 1;
+        dsc.p1.y = prev_y;
+        dsc.p2.x = x;
+        dsc.p2.y = y;
+        lv_draw_line(layer, &dsc);
+        prev_y = y;
+    }
+}
+
 static void build_stats(lv_obj_t *r)
 {
     page_bg(r);
@@ -876,9 +906,17 @@ static void build_stats(lv_obj_t *r)
     lv_snprintf(buf, sizeof buf, "BLE S%d A%d E%d BAT %d%%", s, ac, rc,
                 hal_battery_pct());
     mk_label_c(r, &kenney9, C_MUTED, 120, 172, buf);
-    lv_snprintf(buf, sizeof buf, "TCH R%u F%d E%d", touch_diag.reads,
-                touch_diag.last_fingers, touch_diag.last_event);
-    mk_label_c(r, &kenney9, C_MUTED, 120, 186, buf);
+
+    /* live PPG trace — real optical signal, full width */
+    lv_obj_t *t = lv_obj_create(r);
+    lv_obj_set_pos(t, 12, 190);
+    lv_obj_set_size(t, 216, 42);
+    lv_obj_set_style_bg_opa(t, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(t, 0, 0);
+    lv_obj_set_style_pad_all(t, 0, 0);
+    lv_obj_remove_flag(t, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(t, ppg_draw, LV_EVENT_DRAW_MAIN, NULL);
+    stats_trace = t;
 }
 
 /* ---- dispatch ------------------------------------------------------------------ */
@@ -982,6 +1020,15 @@ void ui_tick(void)
     switch (cur) {
     case SCR_FACE:
         ui_face_tick();
+        break;
+    case SCR_STATS:
+        if (stats_trace) {
+            static uint32_t last_tr;
+            if (now - last_tr >= 100) {
+                last_tr = now;
+                lv_obj_invalidate(stats_trace);
+            }
+        }
         break;
     case SCR_W_RUN: {
         static uint32_t last;

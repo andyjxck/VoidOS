@@ -338,8 +338,8 @@ static void hrs_sample(uint32_t now)
     if (v < ppg_lo) ppg_lo = v;
     if (v > ppg_hi) ppg_hi = v;
 
-    /* spectral DAQ at 10 Hz (sample cadence is ~50 ms) */
-    if (++daq_decim < 5)
+    /* spectral DAQ at 10 Hz: sample cadence is 50 ms -> every 2nd */
+    if (++daq_decim < 2)
         return;
     daq_decim = 0;
     daq[daq_n] = (uint16_t)hrs;

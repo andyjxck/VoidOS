@@ -69,9 +69,14 @@ static void dial_draw(lv_event_t *ev)
     lv_draw_fill_dsc_t fill;
     lv_draw_fill_dsc_init(&fill);
 
-    /* VoidOS signature: teal arc chasing the seconds around the rim */
+    /* VoidOS signature: the seconds arc repaints the rim in a new
+       colour every lap, overwriting the previous lap's colour */
+    static const uint32_t lap_cols[6] = {
+        0x5AC8D2, 0x3CC850, 0xEBC828, 0xE66C9B, 0x9B6CE6, 0xE68C3C
+    };
     int s = hal_clock_second();
     int ms = hal_clock_millis();
+    int m_now = hal_clock_minute() + hal_clock_hour() * 60;
     float sweep = (s + ms / 1000.0f) * 6.0f;   /* degrees, 0 = 12 */
     lv_draw_arc_dsc_t arc;
     lv_draw_arc_dsc_init(&arc);
@@ -79,7 +84,15 @@ static void dial_draw(lv_event_t *ev)
     arc.center.y = CY;
     arc.radius = 114;
     arc.width = 3;
-    arc.color = lv_color_hex(0x5AC8D2);
+    arc.rounded = 1;
+    /* previous lap's colour, full ring, underneath */
+    arc.color = lv_color_hex(lap_cols[(m_now + 5) % 6]);
+    arc.start_angle = -90;
+    arc.end_angle = 270;
+    arc.rounded = 0;
+    lv_draw_arc(layer, &arc);
+    /* current lap paints over it as it sweeps */
+    arc.color = lv_color_hex(lap_cols[m_now % 6]);
     arc.start_angle = -90;
     arc.end_angle = -90 + (int32_t)sweep;
     arc.rounded = 1;
@@ -124,23 +137,6 @@ static void dial_draw(lv_event_t *ev)
     fill.radius = 3;
     lv_draw_fill(layer, &fill, &dot);
 
-    /* live PPG trace inside the dial — real signal, no fake waveform */
-    int y100;
-    if (sensors_ppg(0, &y100)) {
-        int mid = 186, x0 = 76, x1 = 164;
-        int prev_y = mid;
-        for (int x = x0; x <= x1; x++) {
-            int i = (x - x0) * 128 / (x1 - x0);
-            int y = mid - y100 * 7 / 100;
-            if (x > x0) {
-                sensors_ppg(i, &y100);
-                y = mid - y100 * 7 / 100;
-                draw_line(layer, x - 1, prev_y, x, y,
-                          lv_color_hex(0x2E5A66), 1, 0);
-            }
-            prev_y = y;
-        }
-    }
 }
 
 static void heart_draw(lv_event_t *ev)
