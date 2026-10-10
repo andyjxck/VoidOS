@@ -39,7 +39,7 @@ test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu
 	./build/test_ble_dfu
 
 clean:
-	rm -f build/voidos-sim build/test_app build/test_screenshot build/test_input
+	rm -f build/voidos-sim build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_shot.bmp
 	-rmdir build 2>/dev/null || true
 
 .PHONY: all test clean
