@@ -237,27 +237,37 @@ static int hr_analyse(void)
             h++;
     }
     dft64(vre, vim);
+    /* gate on THIS frame's spectrum first — otherwise a stale running
+       average can keep reporting a peak after the signal is gone */
+    float mraw[HR_SPEC];
+    float mx = 0, sum = 0;
+    for (int k = 0; k < HR_SPEC; k++)
+        mraw[k] = sqrtf(vre[k] * vre[k] + vim[k] * vim[k]);
+    for (int k = 3; k <= 26; k++) {
+        sum += mraw[k];
+        if (mraw[k] > mx)
+            mx = mraw[k];
+    }
+    float snr = sum > 0 ? mx / (sum / 24) : 0;
+    last_snr = snr;
+    /* DC gate relative to the peak: broadband junk lifts bin 0 toward
+       the HR-band magnitude, a clean pulse leaves it far below */
+    if (snr <= 3.0f || mraw[0] >= mx * 0.05f)
+        return 0;
+    /* frame passed: merge into the running average */
     if (spec_reset) {
         spec_reset = 0;
         spec_n = 0;
     }
-    for (int k = 0; k < HR_SPEC; k++) {
-        float m = sqrtf(vre[k] * vre[k] + vim[k] * vim[k]);
-        spec[k] = (spec[k] * spec_n + m) / (spec_n + 1);
-    }
+    for (int k = 0; k < HR_SPEC; k++)
+        spec[k] = (spec[k] * spec_n + mraw[k]) / (spec_n + 1);
     if (spec_n < 2)
         spec_n++;
-    /* 10 Hz over 64 bins = 0.15625 Hz/bin; 30-240 BPM -> bins 3..26 */
-    float mx = 0, sum = 0;
-    for (int k = 3; k <= 26; k++) {
-        sum += spec[k];
+    /* recompute peak stats on the smoothed spectrum */
+    mx = 0;
+    for (int k = 3; k <= 26; k++)
         if (spec[k] > mx)
             mx = spec[k];
-    }
-    float snr = sum > 0 ? mx / (sum / 24) : 0;
-    last_snr = snr;
-    if (snr <= 3.0f || spec[0] >= 0.5f)
-        return 0;
     /* exactly one narrow blob above 60% of max */
     float thr = 0.6f * mx;
     int blobs = 0, in = 0, first = 0, last = 0;
