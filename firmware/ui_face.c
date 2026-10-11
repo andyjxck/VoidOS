@@ -19,7 +19,7 @@ void hal_clock_date(int *y, int *mo, int *d, int *dow);
 #define CY 120
 
 static lv_obj_t *dial_obj;
-static lv_obj_t *lbl_bpm, *lbl_steps, *lbl_date, *heart_obj;
+static lv_obj_t *lbl_bpm, *lbl_steps, *lbl_date, *heart_obj, *fp_obj;
 static uint32_t frame_ms;
 
 static void draw_line(lv_layer_t *layer, int x0, int y0, int x1, int y1,
@@ -217,7 +217,8 @@ void ui_face_build(lv_obj_t *scr)
 
     /* complications */
     label(scr, &kenney9, 0x59647B, 90, 50, 60, "VOIDOS");
-    /* steps complication: footprint icon + bare number, no "STEPS" */
+    /* steps complication: footprint icon + bare number, no "STEPS";
+       the pair recentres itself in the tick as digits change */
     static lv_image_dsc_t fp_dsc;
     fp_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     fp_dsc.header.w = 24;
@@ -226,12 +227,13 @@ void ui_face_build(lv_obj_t *scr)
     fp_dsc.header.stride = 24;
     fp_dsc.data = icon_alpha[14];
     fp_dsc.data_size = 24 * 24;
-    lv_obj_t *fp = lv_image_create(scr);
-    lv_image_set_src(fp, &fp_dsc);
-    lv_obj_set_pos(fp, 76, 60);
-    lv_obj_set_style_image_recolor(fp, lv_color_hex(0x8890A0), 0);
-    lv_obj_set_style_image_recolor_opa(fp, LV_OPA_COVER, 0);
-    lbl_steps = label(scr, &kenney9, 0x8890A0, 102, 66, 60, "--");
+    fp_obj = lv_image_create(scr);
+    lv_image_set_src(fp_obj, &fp_dsc);
+    lv_obj_set_pos(fp_obj, 88, 62);
+    lv_obj_set_style_image_recolor(fp_obj, lv_color_hex(0x8890A0), 0);
+    lv_obj_set_style_image_recolor_opa(fp_obj, LV_OPA_COVER, 0);
+    lbl_steps = label(scr, &kenney9, 0x8890A0, 116, 66, 60, "--");
+    lv_obj_set_width(lbl_steps, LV_SIZE_CONTENT);
     lv_obj_set_style_text_align(lbl_steps, LV_TEXT_ALIGN_LEFT, 0);
     lbl_date = label(scr, &kenney9, 0x8890A0, 160, 112, 56, "");
 
@@ -264,6 +266,12 @@ void ui_face_tick(void)
     if (steps != last_steps) {
         lv_snprintf(buf, sizeof buf, "%d", steps >= 0 ? steps : 0);
         lv_label_set_text(lbl_steps, steps >= 0 ? buf : "--");
+        /* keep icon+number centred as a unit under VOIDOS */
+        lv_obj_update_layout(lbl_steps);
+        int tw = lv_obj_get_width(lbl_steps);
+        int gx = 120 - (28 + tw) / 2;
+        lv_obj_set_pos(fp_obj, gx, 62);
+        lv_obj_set_x(lbl_steps, gx + 28);
         last_steps = steps;
     }
     int synced = hal_clock_synced();

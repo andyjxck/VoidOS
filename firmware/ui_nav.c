@@ -413,15 +413,21 @@ static const int16_t cc_hexpos[7][3] = {
     { 91, 178, 5}, {149, 178, 6}
 };
 
-static void hex_fill(lv_layer_t *layer, int cx, int cy, int r, int h,
+/* pointy-top hexagon (apex at top and bottom), the simulator shape:
+   full width for the middle half, tapering to a point at ±R */
+static void hex_fill(lv_layer_t *layer, int cx, int cy, int r,
                      lv_color_t c)
 {
+    int hw_r = r * 866 / 1000;            /* apothem, R * 0.866 */
     lv_draw_line_dsc_t dsc;
     lv_draw_line_dsc_init(&dsc);
     dsc.color = c;
     dsc.opa = LV_OPA_COVER;
-    for (int dy = -h; dy <= h; dy++) {
-        int hw = r - r * (dy < 0 ? -dy : dy) / (2 * h);
+    for (int dy = -r + 1; dy <= r - 1; dy++) {
+        int ay = dy < 0 ? -dy + 1 : dy + 1;
+        int hw = ay <= r / 2 ? hw_r : hw_r * (2 * r - 2 * ay) / r;
+        if (hw < 1)
+            continue;
         dsc.p1.x = cx - hw;
         dsc.p2.x = cx + hw;
         dsc.p1.y = dsc.p2.y = cy + dy;
@@ -429,19 +435,27 @@ static void hex_fill(lv_layer_t *layer, int cx, int cy, int r, int h,
     }
 }
 
-static void vcap_fill(lv_layer_t *layer, int x, int y, int w, int h,
-                      int pct, lv_color_t c)
+/* vertical capsule with rounded ends; inner fill rises from the
+   bottom by pct — the simulator's battery/brightness pills */
+static void vcap_fill(lv_layer_t *layer, int cx, int y0, int w, int h,
+                      int pct, lv_color_t fc)
 {
     lv_draw_rect_dsc_t dsc;
     lv_draw_rect_dsc_init(&dsc);
     dsc.radius = w / 2;
     dsc.bg_opa = LV_OPA_COVER;
-    lv_area_t a = {x, y, x + w - 1, y + h - 1};
-    dsc.bg_color = lv_color_hex(0x28303C);
+    lv_area_t a = {cx - w / 2, y0, cx + w / 2 - 1, y0 + h - 1};
+    dsc.bg_color = lv_color_hex(0x464E5A);          /* shell */
     lv_draw_rect(layer, &dsc, &a);
-    a.y1 = a.y2 - h * pct / 100;
-    dsc.bg_color = c;
-    lv_draw_rect(layer, &dsc, &a);
+    lv_area_t in = {a.x1 + 2, a.y1 + 2, a.x2 - 2, a.y2 - 2};
+    dsc.radius = (w - 4) / 2;
+    dsc.bg_color = lv_color_hex(0x0C0F16);          /* recessed slot */
+    lv_draw_rect(layer, &dsc, &in);
+    int fh = (h - 6) * pct / 100;
+    lv_area_t fill = {in.x1 + 1, in.y2 - fh - 1, in.x2 - 1, in.y2 - 1};
+    dsc.radius = (w - 6) / 2;
+    dsc.bg_color = fc;
+    lv_draw_rect(layer, &dsc, &fill);
 }
 
 /* one draw pass paints the whole control centre — capsules, comb —
@@ -449,15 +463,16 @@ static void vcap_fill(lv_layer_t *layer, int x, int y, int w, int h,
 static void cc_draw(lv_event_t *e)
 {
     lv_layer_t *layer = lv_event_get_layer(e);
-    vcap_fill(layer, 36, 50, 18, 76, hal_battery_pct(),
-              hal_battery_pct() > 30 ? C_GOOD : C_WARN);
-    vcap_fill(layer, 186, 50, 18, 76, brightness, C_ACCENT);
+    int bat = hal_battery_pct();
+    vcap_fill(layer, 46, 22, 16, 72, bat,
+              bat > 30 ? C_GOOD : C_WARN);
+    vcap_fill(layer, 210, 22, 16, 72, brightness, C_ACCENT);
     for (int i = 0; i < 7; i++) {
         int t = cc_hexpos[i][2];
         if ((t == 3 && (cc_hide & 1)) || (t == 4 && (cc_hide & 4)) ||
             (t == 5 && (cc_hide & 2)))
             continue;
-        hex_fill(layer, cc_hexpos[i][0], cc_hexpos[i][1], 30, 26,
+        hex_fill(layer, cc_hexpos[i][0], cc_hexpos[i][1], 30,
                  cc_state(t) ? cc_tint(t) : lv_color_hex(0x232B3B));
     }
 }
@@ -512,17 +527,15 @@ static void build_cc(lv_obj_t *r)
 
     char bb[8];
     lv_snprintf(bb, sizeof bb, "%d%%", hal_battery_pct());
-    mk_icon_at(r, 8, 1, 33, 24);         /* battery icon above capsule */
-    mk_label_c(r, &kenney9, C_MUTED, 45, 132, bb);
-    mk_icon_at(r, 7, 1, 183, 24);        /* light icon above capsule */
-    lv_snprintf(bb, sizeof bb, "%d", brightness);
-    mk_label_c(r, &kenney9, C_MUTED, 195, 132, bb);
+    mk_icon_at(r, 8, 1, 56, 30);         /* battery icon beside capsule */
+    mk_label(r, &kenney9, C_MUTED, 84, 38, bb);
+    mk_icon_at(r, 7, 1, 168, 30);        /* light icon beside capsule */
 
     /* invisible tap targets over the capsule and each hexagon;
        icons sit on the bg layer so hits never paint over art */
     lv_obj_t *btap = lv_obj_create(r);
-    lv_obj_set_pos(btap, 180, 44);
-    lv_obj_set_size(btap, 30, 88);
+    lv_obj_set_pos(btap, 196, 16);
+    lv_obj_set_size(btap, 32, 84);
     lv_obj_set_style_bg_opa(btap, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(btap, 0, 0);
     lv_obj_set_style_pad_all(btap, 0, 0);
@@ -537,8 +550,8 @@ static void build_cc(lv_obj_t *r)
         mk_icon_at(r, tile_icon[t][cc_state(t) != 0], 0,
                    cc_hexpos[i][0] - 12, cc_hexpos[i][1] - 12);
         lv_obj_t *hx = lv_obj_create(r);
-        lv_obj_set_pos(hx, cc_hexpos[i][0] - 28, cc_hexpos[i][1] - 24);
-        lv_obj_set_size(hx, 56, 48);
+        lv_obj_set_pos(hx, cc_hexpos[i][0] - 26, cc_hexpos[i][1] - 28);
+        lv_obj_set_size(hx, 52, 56);
         lv_obj_set_style_bg_opa(hx, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(hx, 0, 0);
         lv_obj_set_style_pad_all(hx, 0, 0);
