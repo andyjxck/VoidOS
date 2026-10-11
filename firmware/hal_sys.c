@@ -131,6 +131,7 @@ int hal_clock_minute(void) { return (int)(wall_ms() / 60000u % 60u); }
 int hal_clock_second(void) { return (int)(wall_ms() / 1000u % 60u); }
 int hal_clock_millis(void) { return (int)(wall_ms() % 1000u); }
 int hal_clock_synced(void) { return clock_valid; }
+uint32_t hal_clock_tod_ms(void) { return wall_ms(); }
 
 void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s)
 {

@@ -10,6 +10,7 @@ int ui_steps(void);
 int sensors_ppg(int i, int *out_y100);
 int sensors_hrs_ok(void);
 int hal_clock_synced(void);
+int ui_face_digital(void);
 void hal_clock_date(int *y, int *mo, int *d, int *dow);
 
 /* Analog face: black field bleeding into the bezel, edge ticks,
@@ -20,6 +21,8 @@ void hal_clock_date(int *y, int *mo, int *d, int *dow);
 
 static lv_obj_t *dial_obj;
 static lv_obj_t *lbl_bpm, *lbl_steps, *lbl_date, *heart_obj, *fp_obj;
+static lv_obj_t *d_lbl_time, *d_lbl_date, *d_lbl_steps, *d_lbl_bpm;
+static int is_digital;
 static uint32_t frame_ms;
 /* label caches live at file scope so ui_face_build can reset them —
    otherwise a rebuilt label keeps its placeholder until the value moves */
@@ -192,8 +195,92 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font,
     return obj;
 }
 
+/* octagon badge outline — the digital face's chamfered cards */
+static void oct_stroke(lv_layer_t *layer, int x, int y, int w, int h,
+                       int cut, lv_color_t c, int lw)
+{
+    int x2 = x + w - 1, y2 = y + h - 1;
+    const int px[8] = {x + cut, x2 - cut, x2, x2, x2 - cut, x + cut, x, x};
+    const int py[8] = {y, y, y + cut, y2 - cut, y2, y2, y2 - cut, y + cut};
+    lv_draw_line_dsc_t dsc;
+    lv_draw_line_dsc_init(&dsc);
+    dsc.color = c;
+    dsc.width = lw;
+    for (int i = 0; i < 8; i++) {
+        dsc.p1.x = px[i];
+        dsc.p1.y = py[i];
+        dsc.p2.x = px[(i + 1) % 8];
+        dsc.p2.y = py[(i + 1) % 8];
+        lv_draw_line(layer, &dsc);
+    }
+}
+
+static void digi_draw(lv_event_t *ev)
+{
+    lv_layer_t *layer = lv_event_get_layer(ev);
+    oct_stroke(layer, 14, 160, 104, 50, 10, lv_color_hex(0x46D8E0), 2);
+    oct_stroke(layer, 122, 160, 104, 50, 10, lv_color_hex(0xF0586E), 2);
+}
+
+/* digital face: big pixel time, date above, octagon badges below —
+   the concept art's take on VoidOS */
+static void build_digital(lv_obj_t *scr)
+{
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
+
+    lv_obj_t *art = lv_obj_create(scr);
+    lv_obj_set_pos(art, 0, 0);
+    lv_obj_set_size(art, 240, 240);
+    lv_obj_set_style_bg_opa(art, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(art, 0, 0);
+    lv_obj_set_style_pad_all(art, 0, 0);
+    lv_obj_remove_flag(art, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(art, digi_draw, LV_EVENT_DRAW_MAIN, NULL);
+
+    d_lbl_date = label(scr, &kenney16, 0xD8E0EC, 40, 42, 160, "FRI, OCT 24");
+    d_lbl_time = label(scr, &kenney56, 0xFFFFFF, 30, 74, 180, "10:09");
+
+    /* badges: footprint + steps (cyan), heart + bpm (pink) */
+    static lv_image_dsc_t fp_dsc;
+    fp_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    fp_dsc.header.w = 24;
+    fp_dsc.header.h = 24;
+    fp_dsc.header.cf = LV_COLOR_FORMAT_A8;
+    fp_dsc.header.stride = 24;
+    fp_dsc.data = icon_alpha[14];
+    fp_dsc.data_size = 24 * 24;
+    fp_obj = lv_image_create(scr);
+    lv_image_set_src(fp_obj, &fp_dsc);
+    lv_obj_set_pos(fp_obj, 24, 172);
+    lv_obj_set_style_image_recolor(fp_obj, lv_color_hex(0x46D8E0), 0);
+    lv_obj_set_style_image_recolor_opa(fp_obj, LV_OPA_COVER, 0);
+    label(scr, &kenney9, 0x8A94A8, 52, 170, 62, "STEPS");
+    d_lbl_steps = label(scr, &kenney24, 0x46D8E0, 52, 182, 62, "8432");
+
+    heart_obj = lv_obj_create(scr);
+    lv_obj_set_pos(heart_obj, 134, 178);
+    lv_obj_set_size(heart_obj, 14, 12);
+    lv_obj_set_style_bg_opa(heart_obj, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(heart_obj, 0, 0);
+    lv_obj_set_style_pad_all(heart_obj, 0, 0);
+    lv_obj_remove_flag(heart_obj,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(heart_obj, heart_draw, LV_EVENT_DRAW_MAIN, NULL);
+    d_lbl_bpm = label(scr, &kenney24, 0xF0586E, 158, 178, 44, "76");
+    label(scr, &kenney9, 0x8A94A8, 182, 196, 40, "BPM");
+
+    last_bpm = last_steps = last_synced = last_dom = last_min = -1;
+}
+
 void ui_face_build(lv_obj_t *scr)
 {
+    is_digital = ui_face_digital();
+    if (is_digital) {
+        build_digital(scr);
+        return;
+    }
     /* true black: the dead bezel disappears into the dial edge */
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
@@ -279,6 +366,51 @@ void ui_face_tick(void)
 {
     frame_ms = hal_millis();
     char buf[24];
+
+    if (is_digital) {
+        int bpm = sensors_bpm();
+        if (bpm != last_bpm) {
+            lv_snprintf(buf, sizeof buf, "%d", bpm > 0 ? bpm : 0);
+            lv_label_set_text(d_lbl_bpm, bpm > 0 ? buf : "--");
+            last_bpm = bpm;
+        }
+        int steps = ui_steps();
+        if (steps != last_steps) {
+            lv_snprintf(buf, sizeof buf, "%d", steps >= 0 ? steps : 0);
+            lv_label_set_text(d_lbl_steps, steps >= 0 ? buf : "--");
+            last_steps = steps;
+        }
+        int sec = hal_clock_second(), min = hal_clock_minute();
+        if (min != last_min || sec != last_sec) {
+            lv_snprintf(buf, sizeof buf, "%02d:%02d",
+                        hal_clock_hour(), min);
+            lv_label_set_text(d_lbl_time, buf);
+            last_sec = sec;
+        }
+        if (min != last_min) {
+            last_min = min;
+            int y, mo, d, dow;
+            hal_clock_date(&y, &mo, &d, &dow);
+            if (hal_clock_synced()) {
+                static const char *dn[8] = {"", "MON", "TUE", "WED",
+                                            "THU", "FRI", "SAT", "SUN"};
+                static const char *mn[13] = {"", "JAN", "FEB", "MAR",
+                                             "APR", "MAY", "JUN", "JUL",
+                                             "AUG", "SEP", "OCT", "NOV",
+                                             "DEC"};
+                lv_snprintf(buf, sizeof buf, "%s, %s %d",
+                            dow >= 1 && dow <= 7 ? dn[dow] : "???",
+                            mo >= 1 && mo <= 12 ? mn[mo] : "???", d);
+                lv_label_set_text(d_lbl_date, buf);
+            }
+        }
+        static uint32_t last_heart;
+        if (frame_ms - last_heart >= 120) {
+            last_heart = frame_ms;
+            lv_obj_invalidate(heart_obj);
+        }
+        return;
+    }
 
     int bpm = sensors_bpm();
     if (bpm != last_bpm) {

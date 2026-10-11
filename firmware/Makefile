@@ -9,7 +9,7 @@ SIZE    = $(CROSS)size
 PYTHON  = $(TOOLS)/python3
 
 ARCH    = -mcpu=cortex-m4 -mthumb -mabi=aapcs -mfloat-abi=hard -mfpu=fpv4-sp-d16
-CFLAGS  = $(ARCH) -std=c11 -O2 -g -ffunction-sections -fdata-sections \
+CFLAGS  = $(ARCH) -std=c11 -Os -g -ffunction-sections -fdata-sections \
           -Wall -Wextra -Werror -I../include -I../core -I. \
           -DVOIDOS_DEVICE -DVOIDOS_DEBUG_TOUCH
 LDFLAGS = $(ARCH) -T link.ld -Wl,--gc-sections -Wl,-Map=voidos-app.map \
@@ -22,7 +22,7 @@ ZIP      = voidos-dfu-$(VERSION).zip
 
 LVGL_SRC := $(shell find vendor/lvgl/src -name '*.c')
 LVGL_OBJS := $(LVGL_SRC:.c=.o)
-LVGL_CFLAGS = $(ARCH) -std=gnu11 -O2 -g -ffunction-sections -fdata-sections \
+LVGL_CFLAGS = $(ARCH) -std=gnu11 -Os -g -ffunction-sections -fdata-sections \
               -w -DLV_CONF_INCLUDE_SIMPLE -DLV_USE_OS=LV_OS_NONE -Ivendor -I.
 
 OBJS = startup.o main.o syscalls.o hal_sys.o hal_display.o lvgl_port.o \

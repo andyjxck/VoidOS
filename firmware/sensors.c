@@ -101,6 +101,11 @@ static void bma_init(void)
     bma_ok = 1;
 }
 
+/* raise-to-wake detector state — see wake_sample in bma_sample */
+#define WH_N 8
+static int16_t whx[WH_N], why[WH_N], whz[WH_N];
+static int wh_idx, wh_n;
+
 static int32_t isqrt(int32_t v)
 {
     int32_t r = 0;
@@ -128,6 +133,21 @@ static void bma_sample(uint32_t now)
     if (z > 2047) z -= 4096;
     /* mounted rotated: swap X/Y to match the watch axes */
     ax = y; ay = x; az = z;
+
+    /* raise-to-wake history: the open PineTime firmware detects the
+       gesture in software over raw axes — the chip's wrist-wear flag
+       never arrived reliably on this unit. 8 samples at 10 Hz (their
+       poll rate; we decimate our 50 Hz sampler by 5). */
+    static int wh_decim;
+    if (++wh_decim >= 5) {
+        wh_decim = 0;
+        whx[wh_idx] = x;               /* RAW axes: their frame */
+        why[wh_idx] = y;
+        whz[wh_idx] = z;
+        wh_idx = (wh_idx + 1) & (WH_N - 1);
+        if (wh_n < WH_N)
+            wh_n++;
+    }
 
     int32_t mag = isqrt((int32_t)ax * ax + (int32_t)ay * ay +
                         (int32_t)az * az);
@@ -188,6 +208,7 @@ static int hra_i;
 static float last_snr;
 static float cand_hz[8];
 static int cand_n;
+static int bad_frames;       /* consecutive rejected frames (holdover) */
 static int last_pk_bpm;      /* diag: raw-frame peak, whether accepted or not */
 
 static void dft64(float *re, float *im)
@@ -472,15 +493,20 @@ static void hrs_sample(uint32_t now)
     last_ibi = (uint32_t)(last_snr * 10);
     if (hz100 == 0) {
         spec_reset = 1;
-        if (bpm_valid) {                 /* signal lost: drop, re-acquire */
+        /* holdover: keep reporting the last lock for ~3 s of bad
+           frames — a single noisy window used to blank the display
+           and force a full re-acquisition. The window keeps sliding
+           so re-lock is instant when the signal returns. */
+        if (bpm_valid && ++bad_frames >= 6) {
             for (int i = 0; i < 20; i++)
                 hra[i] = 0;
             bpm = 0;
             bpm_valid = 0;
-            daq_n = 0;
+            bad_frames = 0;
         }
         return;
     }
+    bad_frames = 0;
     hra[hra_i++ % 20] = hz100 / 100.0f;
     float sum = 0;
     int cnt = 0;
@@ -540,18 +566,77 @@ int sensors_bma_ok(void)  { return bma_ok; }
 int sensors_bma_z(void)   { return bma_ok ? az : 0; }
 int sensors_bma_activity(void) { return bma_ok ? (int)act_delta : 0; }
 
-/* wrist-raise gesture from the feature engine: INT_STAT_1 bit3,
-   clears on read — 1 when the engine flagged a raise since last poll */
+/* asin in degrees: 1024 counts = 1 g, clamp like the reference impl */
+static float wake_asin(int32_t v)
+{
+    float a = v / 1024.0f;
+    if (a > 1.0f) a = 1.0f;
+    if (a < -1.0f) a = -1.0f;
+    return asinf(a) * 57.2957795f;
+}
+
+/* roll angle change between two (y,z) vectors, only meaningful when
+   the accel reads pure gravity — the reference DegreesRolled */
+static int deg_rolled(int32_t y, int32_t z, int32_t py, int32_t pz)
+{
+    int pa = (int)wake_asin(py), ya = (int)wake_asin(y);
+    if (z < 0 && pz < 0)
+        return ya - pa;
+    if (pz < 0)
+        return y < 0 ? -pa - ya - 180 : -pa - ya + 180;
+    if (z < 0)
+        return y < 0 ? pa + ya + 180 : pa + ya - 180;
+    return pa - ya;
+}
+
+/* chip's wrist-wear flag when the engine loaded; kept as a bonus
+   trigger alongside the software detector */
 int sensors_wrist_raise(void)
 {
     if (!bma_engine)
         return 0;
-    /* feature interrupts (step/activity/wrist-wear) live in INT_STATUS_0
-       (0x1C); INT_STATUS_1 (0x1D) carries data-ready/FIFO flags */
     uint8_t v = 0;
     if (!i2c_read_reg(BMA_ADDR, 0x1C, &v, 1))
         return 0;
     return (v & 0x08) ? 1 : 0;
+}
+
+/* software raise-to-wake, ported from the reference watch firmware:
+   newest-2 vs oldest-2 means of an 8-sample 10 Hz history, low
+   variance (gravity only), arm roughly down (yMean in a band), and a
+   >45 deg roll of the y/z plane between them. */
+int sensors_raise_wake(void)
+{
+    if (!bma_ok || wh_n < WH_N)
+        return 0;
+    int i0 = wh_idx,                       /* newest */
+        i1 = (wh_idx + 7) & 7,             /* 1 back */
+        o0 = (wh_idx + 1) & 7,             /* oldest (~0.7 s ago) */
+        o1 = (wh_idx + 2) & 7;             /* 2nd oldest */
+    int32_t xm = ((int32_t)whx[i0] + whx[i1]) / 2;
+    int32_t ym = ((int32_t)why[i0] + why[i1]) / 2;
+    int32_t zm = ((int32_t)whz[i0] + whz[i1]) / 2;
+    int32_t pym = ((int32_t)why[o0] + why[o1]) / 2;
+    int32_t pzm = ((int32_t)whz[o0] + whz[o1]) / 2;
+    /* variance of the newest 2 about their mean */
+    int32_t d = why[i0] - ym;
+    int32_t yv = d * d;
+    d = why[i1] - ym;
+    yv = (yv + d * d) / 2;
+    d = whz[i0] - zm;
+    int32_t zv = d * d;
+    d = whz[i1] - zm;
+    zv = (zv + d * d) / 2;
+
+    if (xm > 384 || xm < -384)
+        return 0;
+    if (yv > 56 * 56)
+        return 0;
+    if (ym < -724 && zv > 56 * 56)
+        return 0;
+    if (ym > -64)
+        return 0;
+    return deg_rolled(ym, zm, pym, pzm) < -45;
 }
 int sensors_bma_engine(void) { return bma_engine; }
 int sensors_bma_dbg(void) { return (bma_id << 16) | (bma_stat << 8) | bma_feat; }
