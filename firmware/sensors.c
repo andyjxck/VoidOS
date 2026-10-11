@@ -22,6 +22,7 @@ int i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val);
 
 static int bma_ok;
 static int bma_engine;          /* feature engine loaded ok */
+static uint8_t bma_id, bma_stat, bma_feat;   /* diag: chip id, ASIC status, feature rd/wr ok */
 static uint32_t steps;
 static int16_t ax, ay, az;
 static int32_t base;            /* gravity baseline, mg */
@@ -39,7 +40,8 @@ static void bma_init(void)
     i2c_write_reg(BMA_ADDR, 0x7E, 0xB6);      /* soft reset */
     hal_delay_ms(2);
     if (!i2c_read_reg(BMA_ADDR, 0x00, &id, 1) || !id)
-        return;                             /* chip id 0x11/0x13/... */
+        return;
+    bma_id = id;                             /* chip id 0x11/0x13/... */
     i2c_write_reg(BMA_ADDR, 0x7C, 0x00);      /* adv power-save off */
     hal_delay_ms(1);
 
@@ -54,17 +56,24 @@ static void bma_init(void)
         i2c_write_regs(BMA_ADDR, 0x5E, bma_cfg + i, n);
     }
     i2c_write_reg(BMA_ADDR, 0x59, 0x01);      /* start the ASIC */
-    hal_delay_ms(150);
     uint8_t stat = 0;
-    i2c_read_reg(BMA_ADDR, 0x2A, &stat, 1);   /* INTERNAL_STAT */
+    for (int t = 0; t < 12; t++) {            /* poll up to ~600 ms */
+        hal_delay_ms(50);
+        i2c_read_reg(BMA_ADDR, 0x2A, &stat, 1);   /* INTERNAL_STAT */
+        if ((stat & 0x0F) == 0x01)
+            break;
+    }
+    bma_stat = stat;
     if ((stat & 0x0F) == 0x01) {              /* ASIC_INITIALIZED */
         /* enable on-chip features: byte 0x3B bit4 = step counter,
            byte 0x40 bit0 = wrist-wear (raise gesture) */
         uint8_t feat[70];
         if (i2c_read_reg(BMA_ADDR, 0x5E, feat, 70)) {
+            bma_feat |= 1;
             feat[0x3B] |= 0x10;
             feat[0x40] |= 0x01;
             if (i2c_write_regs(BMA_ADDR, 0x5E, feat, 70)) {
+                bma_feat |= 2;
                 bma_engine = 1;
                 /* latch feature flags until read, and route wrist-wear
                    so a poll can never miss a short pulse */
@@ -167,6 +176,9 @@ static int spec_n, spec_reset = 1;
 static float hra[20];
 static int hra_i;
 static float last_snr;
+static float cand_hz[6];
+static int cand_n;
+static int last_pk_bpm;      /* diag: raw-frame peak, whether accepted or not */
 
 static void dft64(float *re, float *im)
 {
@@ -257,6 +269,47 @@ static int hr_analyse(void)
     }
     float snr = sum > 0 ? mx / (sum / 24) : 0;
     last_snr = snr;
+    /* raw-frame peak with parabolic interpolation, for the consistency
+       tracker below and the diag screen */
+    int pk = 3;
+    for (int k = 3; k <= 26; k++)
+        if (mraw[k] == mx) {
+            pk = k;
+            break;
+        }
+    float pkf = pk;
+    if (pk > 3 && pk < 26) {
+        float a = mraw[pk - 1], b = mraw[pk], c = mraw[pk + 1];
+        float den = a - 2 * b + c;
+        if (den != 0)
+            pkf += 0.5f * (a - c) / den;
+    }
+    float pk_hz = pkf * hr_fs / HR_N;
+    last_pk_bpm = (int)(pk_hz * 60.0f + 0.5f);
+    /* consistency path: a real pulse repeats. Three consecutive frames
+       whose peaks agree within 8% count even if SNR is mediocre */
+    if (snr >= 2.6f && pk_hz >= 40.0f / 60.0f && pk_hz <= 200.0f / 60.0f) {
+        if (cand_n == 6) {
+            for (int i = 0; i < 5; i++)
+                cand_hz[i] = cand_hz[i + 1];
+            cand_n = 5;
+        }
+        cand_hz[cand_n++] = pk_hz;
+    } else {
+        cand_n = 0;
+    }
+    if (cand_n >= 5) {
+        float m = 0;
+        for (int i = cand_n - 5; i < cand_n; i++)
+            m += cand_hz[i];
+        m /= 5.0f;
+        int ok = 1;
+        for (int i = cand_n - 5; i < cand_n; i++)
+            if (cand_hz[i] < m * 0.93f || cand_hz[i] > m * 1.07f)
+                ok = 0;
+        if (ok)
+            return (int)(m * 100 + 0.5f);
+    }
     /* DC gate relative to the peak: broadband junk lifts bin 0 toward
        the HR-band magnitude, a clean pulse leaves it far below */
     if (snr <= 3.0f || mraw[0] >= mx * 0.05f)
@@ -462,8 +515,10 @@ int sensors_wrist_raise(void)
     return (v & 0x08) ? 1 : 0;
 }
 int sensors_bma_engine(void) { return bma_engine; }
+int sensors_bma_dbg(void) { return (bma_id << 16) | (bma_stat << 8) | bma_feat; }
 int sensors_hrs_fs10(void) { return (int)(hr_fs * 10.0f); }
 int sensors_retries(void) { return (int)(hrs_retries * 100 + bma_retries); }
+int sensors_hrs_pk(void) { return last_pk_bpm; }
 int sensors_hrs_snr10(void) { return (int)(last_snr * 10); }
 int sensors_hrs_windows(void) { return (int)beats; }
 int sensors_hrs_ok(void)  { return hrs_ok; }

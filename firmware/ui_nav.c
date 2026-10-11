@@ -1304,7 +1304,8 @@ static void build_cardio(lv_obj_t *r)
 
 int sensors_hrs_raw(void), sensors_hrs_ac(void), sensors_hrs_fs10(void);
 int sensors_hrs_snr10(void), sensors_hrs_windows(void), sensors_retries(void);
-int sensors_bma_engine(void);
+int sensors_bma_engine(void), sensors_bma_dbg(void), sensors_hrs_pk(void);
+int hal_battery_raw(void);
 int hal_clock_synced(void);
 int ancs_cts_state(void);
 void ble_link_diag(int *conns, int *sec_rc, int *enc_status,
@@ -1327,21 +1328,24 @@ static void diag_fill(void)
     ble_link_diag(&conns, &sec, &enc, &disc, &encd);
     lv_snprintf(b, sizeof b,
         "HRS ok%d raw%d ac%d\n"
-        " snr%d.%d win%d fs%d.%d bpm%d\n"
-        "BMA ok%d eng%d stp%d rty%d\n"
+        " snr%d.%d fs%d.%d pk%d bpm%d\n"
+        "BMA ok%d eng%d stp%d id%X\n"
+        " st%X f%d rty%d\n"
         "BLE st%d conn%d enc%d\n"
         " sec%d encst%d disc%d\n"
         " ancs%d cts%d time%d\n"
-        "LOOP %d/s bat%d%%",
+        "LOOP %d/s bat%d%% r%d",
         sensors_hrs_ok(), sensors_hrs_raw(), sensors_hrs_ac(),
         sensors_hrs_snr10() / 10, sensors_hrs_snr10() % 10,
-        sensors_hrs_windows(), sensors_hrs_fs10() / 10,
-        sensors_hrs_fs10() % 10, sensors_bpm(),
+        sensors_hrs_fs10() / 10, sensors_hrs_fs10() % 10,
+        sensors_hrs_pk(), sensors_bpm(),
         sensors_bma_ok(), sensors_bma_engine(), sensors_steps(),
+        (sensors_bma_dbg() >> 16) & 0xFF,
+        (sensors_bma_dbg() >> 8) & 0xFF, sensors_bma_dbg() & 0xFF,
         sensors_retries(),
         ble_status(), conns, encd, sec, enc, disc,
         ancs_state(), ancs_cts_state(), hal_clock_synced(),
-        (int)diag_lps, hal_battery_pct());
+        (int)diag_lps, hal_battery_pct(), hal_battery_raw());
     if (diag_lbl)
         lv_label_set_text(diag_lbl, b);
 }

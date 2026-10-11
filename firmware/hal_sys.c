@@ -194,7 +194,12 @@ void hal_motor(int on)
 #define SAADC_BASE      0x40007000u
 #define SAADC_START     REG32(SAADC_BASE + 0x000)
 #define SAADC_SAMPLE    REG32(SAADC_BASE + 0x004)
+#define SAADC_STOP      REG32(SAADC_BASE + 0x008)
+#define SAADC_EVENTS_STARTED REG32(SAADC_BASE + 0x100)
 #define SAADC_EVENTS_END REG32(SAADC_BASE + 0x108)
+#define SAADC_EVENTS_STOPPED REG32(SAADC_BASE + 0x110)
+static int battery_raw;
+int hal_battery_raw(void) { return battery_raw; }
 #define SAADC_BUSY      REG32(SAADC_BASE + 0x400)
 #define SAADC_ENABLE    REG32(SAADC_BASE + 0x500)
 #define SAADC_CH0_PSELP REG32(SAADC_BASE + 0x510)
@@ -221,13 +226,24 @@ int hal_battery_pct(void)
     SAADC_RESOL = 2;                /* 12 bit */
     SAADC_RES_PTR = (uint32_t)result;
     SAADC_RES_MAX = 1;
+    SAADC_EVENTS_STARTED = 0;
     SAADC_EVENTS_END = 0;
+    SAADC_EVENTS_STOPPED = 0;
+    result[0] = 0;
     SAADC_START = 1;
+    /* datasheet order: START -> STARTED -> SAMPLE -> END -> STOP. A
+       SAMPLE fired before STARTED is dropped and the result stays 0 */
+    for (unsigned spin = 0; !SAADC_EVENTS_STARTED && spin < 200000; spin++)
+        ;
     SAADC_SAMPLE = 1;
     for (unsigned spin = 0; !SAADC_EVENTS_END && spin < 200000; spin++)
         ;
+    SAADC_STOP = 1;
+    for (unsigned spin = 0; !SAADC_EVENTS_STOPPED && spin < 200000; spin++)
+        ;
     SAADC_ENABLE = 0;
     int raw = result[0];
+    battery_raw = raw;
     if (raw < 0) raw = 0;
     /* raw/4096 * 3.6V input range * 2 (the 2:1 battery divider) */
     uint32_t mv = (uint32_t)raw * 7200u / 4096u;
