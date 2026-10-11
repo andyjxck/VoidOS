@@ -653,8 +653,9 @@ static void build_cc(lv_obj_t *r)
         if ((t == 3 && (cc_hide & 1)) || (t == 4 && (cc_hide & 4)) ||
             (t == 5 && (cc_hide & 2)))
             continue;
-        mk_icon_at(r, tile_icon[t][cc_state(t) != 0], 0,
-                   cc_hexpos[i][0] - 12, cc_hexpos[i][1] - 12);
+        lv_obj_t *ic = mk_icon_at(r, tile_icon[t][cc_state(t) != 0], 0,
+                                  cc_hexpos[i][0] - 12, cc_hexpos[i][1] - 12);
+        lv_obj_set_style_image_recolor(ic, cc_state(t) ? C_WHITE : C_MUTED, 0);
         lv_obj_t *hx = lv_obj_create(r);
         lv_obj_set_pos(hx, cc_hexpos[i][0] - 26, cc_hexpos[i][1] - 28);
         lv_obj_set_size(hx, 52, 56);
@@ -1332,10 +1333,20 @@ static void ppg_draw(lv_event_t *ev)
 
 /* one simulator stat card: sharp-cornered fill, small muted label
    top-left, coloured value right-aligned */
+static void stat_tap_cb(lv_event_t *e)
+{
+    int to = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (to >= 0)
+        nav_to((scr_t)to);
+}
+
 static void stat_card(lv_obj_t *r, int x, int y, const char *lab,
-                      const char *val, lv_color_t vc, int icon)
+                      const char *val, lv_color_t vc, int icon, int to)
 {
     lv_obj_t *c = lv_obj_create(r);
+    lv_obj_set_user_data(c, (void *)(intptr_t)to);
+    if (to >= 0)
+        lv_obj_add_event_cb(c, stat_tap_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_set_pos(c, x, y);
     lv_obj_set_size(c, 96, 44);
     lv_obj_set_style_bg_color(c, lv_color_hex(0x1A2230), 0);
@@ -1343,7 +1354,9 @@ static void stat_card(lv_obj_t *r, int x, int y, const char *lab,
     lv_obj_set_style_radius(c, 4, 0);
     lv_obj_set_style_border_width(c, 0, 0);
     lv_obj_set_style_pad_all(c, 0, 0);
-    lv_obj_remove_flag(c, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+    if (to < 0)
+        lv_obj_remove_flag(c, LV_OBJ_FLAG_CLICKABLE);
     if (icon >= 0)
         mk_icon_at(c, icon, 0, 6, 10);
     mk_label(c, &kenney9, C_MUTED, icon >= 0 ? 34 : 8, 7, lab);
@@ -1359,15 +1372,19 @@ static void build_stats(lv_obj_t *r)
     int bpm = sensors_bpm();
 
     lv_snprintf(buf, sizeof buf, "%d", steps >= 0 ? steps : 0);
-    stat_card(r, 18, 40, "STEPS", steps >= 0 ? buf : "--", C_WHITE, 14);
+    stat_card(r, 18, 40, "STEPS", steps >= 0 ? buf : "--", C_WHITE, 14, -1);
     lv_snprintf(buf, sizeof buf, "%d BPM", bpm > 0 ? bpm : 0);
     stat_card(r, 126, 40, "HEART",
-              bpm > 0 ? buf : (bpm == 0 ? "SENS" : "--"), C_ACCENT, -1);
+              bpm > 0 ? buf : (bpm == 0 ? "SENS" : "--"), C_ACCENT, -1,
+              SCR_CARDIO);
 
     lv_snprintf(buf, sizeof buf, "%d", resting_bpm);
     stat_card(r, 18, 90, "RESTING", resting_bpm ? buf : "--",
-              C_WHITE, -1);
-    stat_card(r, 126, 90, "HRV", "--", C_ACCENT, -1);
+              C_WHITE, -1, SCR_CARDIO);
+    /* energy: a simple step-based estimate, like the simulator card */
+    lv_snprintf(buf, sizeof buf, "%d KCAL",
+                steps >= 0 ? steps * 4 / 100 : 0);
+    stat_card(r, 126, 90, "ENERGY", buf, C_WARN, -1, -1);
 
     if (s_in_bed) {
         lv_snprintf(buf, sizeof buf, "IN BED");
@@ -1377,9 +1394,10 @@ static void build_stats(lv_obj_t *r)
     } else {
         lv_snprintf(buf, sizeof buf, "--");
     }
-    stat_card(r, 18, 140, "SLEEP", buf, C_WHITE, -1);
+    stat_card(r, 18, 140, "SLEEP", buf, C_WHITE, -1, SCR_SLEEP);
     lv_snprintf(buf, sizeof buf, "%d ML", water_ml);
-    stat_card(r, 126, 140, "WATER", buf, lv_color_hex(0x1E96BE), 5);
+    stat_card(r, 126, 140, "WATER", buf, lv_color_hex(0x1E96BE), 5,
+              SCR_WATER);
 
     /* workout status strip — same flat bar as the simulator */
     lv_obj_t *bar = lv_obj_create(r);
@@ -1390,7 +1408,9 @@ static void build_stats(lv_obj_t *r)
     lv_obj_set_style_radius(bar, 4, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_user_data(bar, (void *)(intptr_t)SCR_WORKOUT);
+    lv_obj_add_event_cb(bar, stat_tap_cb, LV_EVENT_CLICKED, NULL);
     mk_label(bar, &kenney9, C_MUTED, 8, 9,
              w_active ? "WORKOUT LIVE" : "LAST WORKOUT");
     if (w_active) {
@@ -1630,7 +1650,7 @@ int sensors_hrs_snr10(void), sensors_hrs_windows(void), sensors_retries(void);
 int sensors_bma_engine(void), sensors_bma_dbg(void), sensors_hrs_pk(void);
 int hal_battery_raw(void);
 int hal_clock_synced(void);
-int ancs_cts_state(void);
+int ancs_cts_state(void), ancs_sub_fail(void), sensors_hrs_als(void);
 void ble_link_diag(int *conns, int *sec_rc, int *enc_status,
                    int *disc_reason, int *encrypted);
 
@@ -1650,15 +1670,15 @@ static void diag_fill(void)
     int conns, sec, enc, disc, encd;
     ble_link_diag(&conns, &sec, &enc, &disc, &encd);
     lv_snprintf(b, sizeof b,
-        "HRS ok%d raw%d ac%d\n"
+        "HRS ok%d raw%d als%d ac%d\n"
         " snr%d.%d fs%d.%d pk%d bpm%d\n"
         "BMA ok%d eng%d stp%d id%X\n"
         " st%X f%d rty%d\n"
         "BLE st%d conn%d enc%d\n"
         " sec%d encst%d disc%d\n"
-        " ancs%d cts%d time%d\n"
+        " ancs%d sub%d cts%d time%d\n"
         "LOOP %d/s bat%d%% r%d",
-        sensors_hrs_ok(), sensors_hrs_raw(), sensors_hrs_ac(),
+        sensors_hrs_ok(), sensors_hrs_raw(), sensors_hrs_als(), sensors_hrs_ac(),
         sensors_hrs_snr10() / 10, sensors_hrs_snr10() % 10,
         sensors_hrs_fs10() / 10, sensors_hrs_fs10() % 10,
         sensors_hrs_pk(), sensors_bpm(),
@@ -1667,7 +1687,7 @@ static void diag_fill(void)
         (sensors_bma_dbg() >> 8) & 0xFF, sensors_bma_dbg() & 0xFF,
         sensors_retries(),
         ble_status(), conns, encd, sec, enc, disc,
-        ancs_state(), ancs_cts_state(), hal_clock_synced(),
+        ancs_state(), ancs_sub_fail(), ancs_cts_state(), hal_clock_synced(),
         (int)diag_lps, hal_battery_pct(), hal_battery_raw());
     if (diag_lbl)
         lv_label_set_text(diag_lbl, b);
