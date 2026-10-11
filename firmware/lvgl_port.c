@@ -12,7 +12,7 @@ uint32_t hal_millis_raw(void);
 int ui_asleep(void);
 void ui_wake(void);
 void ui_activity(void);
-void ui_swipe(int cst_dir, int start_x);
+int ui_swipe(int cst_dir, int start_x);
 
 /* partial-render buffer: LVGL renders into this, we push it to the LCD */
 static uint16_t draw_buf[240 * 32];
@@ -60,8 +60,8 @@ static void read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     int g = touch_gesture();
     if (g >= 1 && g <= 4) {
         ui_activity();
-        ui_swipe(g, touch_gesture_x());
-        eat_touch = 1;
+        if (ui_swipe(g, touch_gesture_x()))
+            eat_touch = 1;
     }
     if (eat_touch) {
         if (!touch_sample(&x, &y))
@@ -91,6 +91,8 @@ void lvgl_port_init(void)
 
     lv_display_t *disp = lv_display_create(VOIDOS_WIDTH, VOIDOS_HEIGHT);
     lv_display_set_flush_cb(disp, flush_cb);
+    /* panel wants big-endian RGB565; let LVGL render it that way */
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565_SWAPPED);
     lv_display_set_buffers(disp, draw_buf, NULL, sizeof draw_buf,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
 

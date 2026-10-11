@@ -148,7 +148,7 @@ overrides = {
     'BLE_GATT_WRITE_MAX_ATTRS': '0',
     'BLE_GATT_WRITE_RELIABLE': '0',
     'BLE_GATT_RESUME_RATE': '1000',
-    'BLE_GATT_NOTIFY': '0',
+    'BLE_GATT_NOTIFY': '1',           # gates notify RX (ANCS) AND TX (DFU acks)
     'BLE_CONN_SUBRATING': '0',
     'BLE_TRANSPORT': '1',
     'BLE_TRANSPORT_HS': '"native"',

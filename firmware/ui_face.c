@@ -21,6 +21,11 @@ void hal_clock_date(int *y, int *mo, int *d, int *dow);
 static lv_obj_t *dial_obj;
 static lv_obj_t *lbl_bpm, *lbl_steps, *lbl_date, *heart_obj, *fp_obj;
 static uint32_t frame_ms;
+/* label caches live at file scope so ui_face_build can reset them —
+   otherwise a rebuilt label keeps its placeholder until the value moves */
+static int last_bpm = -1, last_steps = -1, last_synced = -1, last_dom = -1;
+static int last_sec = -1, last_min = -1;
+static lv_area_t prev_hand;
 
 static void draw_line(lv_layer_t *layer, int x0, int y0, int x1, int y1,
                       lv_color_t color, int width, int round_end)
@@ -237,6 +242,8 @@ void ui_face_build(lv_obj_t *scr)
     lv_obj_set_style_text_align(lbl_steps, LV_TEXT_ALIGN_LEFT, 0);
     lbl_date = label(scr, &kenney9, 0x8890A0, 160, 112, 56, "");
 
+    last_bpm = last_steps = last_synced = last_dom = last_min = -1;
+    prev_hand.x1 = prev_hand.x2 = 0;
     heart_obj = lv_obj_create(scr);
     lv_obj_set_pos(heart_obj, 96, 172);
     lv_obj_set_size(heart_obj, 14, 12);
@@ -249,10 +256,27 @@ void ui_face_build(lv_obj_t *scr)
     lv_obj_set_style_text_align(lbl_bpm, LV_TEXT_ALIGN_LEFT, 0);
 }
 
+
+/* bounding box of the second hand + its rim-arc tip at a given angle */
+static void sec_area(float deg, lv_area_t *a)
+{
+    float r = (deg - 90.0f) * 0.0174533f;
+    int tx = CX + (int)(cosf(r) * 88), ty = CY + (int)(sinf(r) * 88);
+    int bx = CX - (int)(cosf(r) * 18), by = CY - (int)(sinf(r) * 18);
+    int ax = CX + (int)(cosf(r) * 114), ay = CY + (int)(sinf(r) * 114);
+    int x1 = tx, x2 = tx, y1 = ty, y2 = ty;
+    const int px[3] = {bx, ax, CX}, py[3] = {by, ay, CY};
+    for (int i = 0; i < 3; i++) {
+        if (px[i] < x1) x1 = px[i];
+        if (px[i] > x2) x2 = px[i];
+        if (py[i] < y1) y1 = py[i];
+        if (py[i] > y2) y2 = py[i];
+    }
+    a->x1 = x1 - 6; a->y1 = y1 - 6; a->x2 = x2 + 6; a->y2 = y2 + 6;
+}
+
 void ui_face_tick(void)
 {
-    static int last_bpm = -1, last_steps = -1, last_synced = -1;
-    static int last_dom = -1;
     frame_ms = hal_millis();
     char buf[24];
 
@@ -290,7 +314,34 @@ void ui_face_tick(void)
         last_synced = synced;
         last_dom = d;
     }
-    /* hands sweep every frame — the whole point of an analog face */
-    lv_obj_invalidate(dial_obj);
-    lv_obj_invalidate(heart_obj);
+    /* Repaint only what moved. A full 240x240 invalidate is 115 KB over
+       SPI per frame (~115 ms at 8 MHz) — the source of the jerky hand.
+       The second hand + arc tip get a tight union of old and new boxes;
+       the minute/hour hands only move once a minute, so a full dial
+       repaint then is cheap. */
+    int sec = hal_clock_second(), min = hal_clock_minute();
+    if (min != last_min) {
+        last_min = min;
+        lv_obj_invalidate(dial_obj);
+    } else {
+        lv_area_t now_a;
+        sec_area((sec + hal_clock_millis() / 1000.0f) * 6.0f, &now_a);
+        lv_area_t u = now_a;
+        if (prev_hand.x2 > prev_hand.x1) {
+            if (prev_hand.x1 < u.x1) u.x1 = prev_hand.x1;
+            if (prev_hand.y1 < u.y1) u.y1 = prev_hand.y1;
+            if (prev_hand.x2 > u.x2) u.x2 = prev_hand.x2;
+            if (prev_hand.y2 > u.y2) u.y2 = prev_hand.y2;
+        }
+        lv_obj_invalidate_area(dial_obj, &u);
+        prev_hand = now_a;
+    }
+    (void)last_sec;
+    last_sec = sec;
+    /* the heart only needs ~8 Hz */
+    static uint32_t last_heart;
+    if (frame_ms - last_heart >= 120) {
+        last_heart = frame_ms;
+        lv_obj_invalidate(heart_obj);
+    }
 }

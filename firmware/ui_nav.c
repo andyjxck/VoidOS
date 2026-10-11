@@ -8,6 +8,8 @@
 #include "board.h"
 
 void display_backlight(int level);
+void display_sleep(int on);
+void touch_sleep(int on);
 void ui_face_build(lv_obj_t *root);
 void ui_face_tick(void);
 void sensors_tick(uint32_t now);
@@ -20,6 +22,7 @@ int hal_clock_hour(void);
 int hal_clock_minute(void);
 void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s);
 void hal_clock_date(int *y, int *mo, int *d, int *dow);
+int hal_clock_synced(void);
 extern const lv_font_t kenney9, kenney16, kenney24, kenney56;
 
 /* ---- state -------------------------------------------------------------- */
@@ -53,9 +56,10 @@ static void apply_radio(void)
 }
 
 /* workout */
-static int w_active, w_paused, w_sets;
+static int w_active, w_paused, w_sets, w_last_sets;
 static uint32_t w_start_ms, w_pause_ms, w_paused_total, w_last_ms;
 static int w_routine = -1;
+#define W_MAX_SETS 3
 
 /* sleep */
 static int s_track = 1, s_in_bed;
@@ -73,6 +77,9 @@ static int timer_done;
 static uint32_t motor_off_at;
 static int resting_bpm;         /* lowest BPM seen this session */
 static int alarm_on = 1;
+static int alarm_h = 7, alarm_m = 0;
+static int alarm_ringing;
+static int alarm_fired_min = -1;    /* minute-of-day already fired */
 
 /* navigation */
 static scr_t back_target = SCR_FACE;
@@ -95,6 +102,9 @@ struct persist {
     uint8_t brightness, dnd, airplane, water_lock, bt_on;
     uint8_t cc_hide, water_ml, alarm_on;
     uint32_t steps_total, chip_at_save;
+    uint8_t alarm_h, alarm_m;
+    uint16_t last_sleep_min, last_workout_min;
+    uint8_t last_workout_sets, s_track;
 };
 static struct persist P;
 
@@ -109,10 +119,22 @@ int ui_steps(void)
     return (int)tot;
 }
 
+static int persist_dirty;
+static uint32_t persist_dirty_ms;
+
+/* mark for a deferred write: the 4 KB sector erase stalls the UI and
+   BLE for up to ~300 ms, so it never runs inside a tap handler */
+static void persist_mark(void)
+{
+    persist_dirty = 1;
+    persist_dirty_ms = hal_millis();
+}
+
 static void persist_save(void)
 {
+    persist_dirty = 0;
     P.magic = 0x564F4944u;
-    P.ver = 1;
+    P.ver = 2;
     P.brightness = (uint8_t)brightness;
     P.dnd = (uint8_t)dnd_on;
     P.airplane = (uint8_t)airplane_on;
@@ -121,8 +143,16 @@ static void persist_save(void)
     P.cc_hide = (uint8_t)cc_hide;
     P.water_ml = (uint8_t)(water_ml / 250);
     P.alarm_on = (uint8_t)alarm_on;
-    P.steps_total = (uint32_t)ui_steps();
-    P.chip_at_save = (uint32_t)sensors_steps();
+    P.alarm_h = (uint8_t)alarm_h;
+    P.alarm_m = (uint8_t)alarm_m;
+    P.last_sleep_min = (uint16_t)(s_last_ms / 60000u);
+    P.last_workout_min = (uint16_t)(w_last_ms / 60000u);
+    P.last_workout_sets = (uint8_t)w_last_sets;
+    P.s_track = (uint8_t)s_track;
+    if (sensors_steps() >= 0) {      /* a dead BMA must not poison totals */
+        P.steps_total = (uint32_t)ui_steps();
+        P.chip_at_save = (uint32_t)sensors_steps();
+    }
     spi_flash_init();
     spi_flash_sector_erase(PERSIST_ADDR);
     spi_flash_write(PERSIST_ADDR, (const uint8_t *)&P, sizeof P);
@@ -132,18 +162,27 @@ static void persist_load(void)
 {
     spi_flash_init();
     spi_flash_read(PERSIST_ADDR, (uint8_t *)&P, sizeof P);
-    if (P.magic != 0x564F4944u || P.ver != 1) {
+    if (P.magic != 0x564F4944u || P.ver != 2) {
         memset(&P, 0, sizeof P);
         return;
     }
     brightness = P.brightness;
     dnd_on = P.dnd;
     airplane_on = P.airplane;
-    water_lock = P.water_lock;
+    /* never boot locked: a persisted lock was a trap */
+    water_lock = 0;
     bt_on = P.bt_on;
     cc_hide = P.cc_hide;
     water_ml = P.water_ml * 250;
     alarm_on = P.alarm_on;
+    if (P.alarm_h < 24 && P.alarm_m < 60) {
+        alarm_h = P.alarm_h;
+        alarm_m = P.alarm_m;
+    }
+    s_last_ms = (uint32_t)P.last_sleep_min * 60000u;
+    w_last_ms = (uint32_t)P.last_workout_min * 60000u;
+    w_last_sets = P.last_workout_sets;
+    s_track = P.s_track;
 }
 
 /* ---- helpers ------------------------------------------------------------ */
@@ -247,20 +286,52 @@ static void page_bg(lv_obj_t *parent)
 
 static void rebuild(void);
 
+/* real back stack: "<" and L->R return to wherever you came from
+   (SETTIME -> SETTINGS, CC -> SETTINGS -> CC, launcher app -> launcher).
+   Face/CC/launcher are roots: navigating to one clears the stack. */
+static scr_t nav_stack[6];
+static int nav_sp;
+static void notif_reset_view(void);
+static uint32_t notif_sel_uid;
+
 static void nav_to(scr_t s)
 {
-    if (s == SCR_LAUNCHER)
-        back_target = SCR_FACE;
-    else if (s != SCR_FACE && s != SCR_CC)
-        back_target = SCR_LAUNCHER;
+    if (cur == SCR_NOTIF && s != SCR_NOTIF)
+        notif_reset_view();
+    if (s == SCR_FACE || s == SCR_CC || s == SCR_LAUNCHER) {
+        nav_sp = 0;
+    } else if (s != cur) {
+        if (nav_sp < 6)
+            nav_stack[nav_sp++] = cur;
+        else {
+            for (int i = 0; i < 5; i++)
+                nav_stack[i] = nav_stack[i + 1];
+            nav_stack[5] = cur;
+        }
+    }
+    back_target = nav_sp ? nav_stack[nav_sp - 1] : SCR_FACE;
     cur = s;
     rebuild();
+}
+
+static void nav_back(void)
+{
+    if (nav_sp) {
+        scr_t to = nav_stack[--nav_sp];
+        if (cur == SCR_NOTIF)
+            notif_reset_view();
+        back_target = nav_sp ? nav_stack[nav_sp - 1] : SCR_FACE;
+        cur = to;
+        rebuild();
+    } else {
+        nav_to(SCR_FACE);
+    }
 }
 
 static void back_cb(lv_event_t *e)
 {
     (void)e;
-    nav_to(back_target);
+    nav_back();
 }
 
 /* CST816S gesture register IDs: 1=down 2=up 3=left(R->L) 4=right(L->R).
@@ -292,23 +363,35 @@ static void dir_nav(int cst_dir, int start_x)
         if (cst_dir == 1)
             nav_to(SCR_FACE);
     } else if (cur == SCR_NOTIF) {
-        if (cst_dir == 3)
-            nav_to(SCR_FACE);
+        if (cst_dir == 3) {
+            if (notif_sel_uid) {
+                notif_reset_view();
+                rebuild();
+            } else {
+                nav_back();
+            }
+        }
     } else if (cur == SCR_CARDIO) {
         if (cst_dir == 4)
             nav_to(SCR_FACE);
     } else {
         if (cst_dir == 4)
-            nav_to(back_target);
+            nav_back();
     }
 }
 
 static uint32_t last_swipe_ms;
 
-void ui_swipe(int cst_dir, int start_x)
+int ui_swipe(int cst_dir, int start_x)
 {
     last_swipe_ms = hal_millis();
+    /* the honeycomb is dragged with the finger: only its exit swipe
+       (up) is a navigation gesture, everything else stays an LVGL drag */
+    if (cur == SCR_LAUNCHER && cst_dir != 2)
+        return 0;
+    scr_t before = cur;
     dir_nav(cst_dir, start_x);
+    return cur != before;
 }
 
 static uint32_t ui_start_ms;
@@ -330,6 +413,9 @@ void ui_wake(void)
 {
     if (asleep) {
         asleep = 0;
+        display_sleep(0);
+        touch_sleep(0);
+        lv_obj_invalidate(lv_screen_active());  /* panel RAM is stale */
         display_backlight(bl_level());
     }
     last_input_ms = hal_millis();
@@ -495,7 +581,7 @@ static void cc_cb(lv_event_t *e)
         brightness = brightness >= 100 ? 25 : brightness + 25;
         if (!torch_on)
             display_backlight(1 + brightness * 2 / 100);
-        persist_save();
+        persist_mark();
         rebuild();
         return;
     }
@@ -525,7 +611,7 @@ static void cc_cb(lv_event_t *e)
         return;
     default: break;
     }
-    persist_save();
+    persist_mark();
     rebuild();
 }
 
@@ -583,28 +669,175 @@ static void build_cc(lv_obj_t *r)
 
 /* ---- launcher ------------------------------------------------------------- */
 
-static void launcher_cb(lv_event_t *e)
+/* Honeycomb launcher: a hex grid you drag around; the cell nearest the
+   centre is in focus and drawn larger, its name shown underneath. Tap
+   any cell to open it. One draw pass paints everything. */
+#define HC_R    30                 /* base hex radius */
+#define HC_W    52                 /* horizontal pitch  (R*sqrt3) */
+#define HC_V    45                 /* vertical pitch    (R*1.5)   */
+#define HC_N    9
+static const struct { int8_t q, r; const char *name; scr_t scr; } hc[HC_N] = {
+    { 0,  0, "WORKOUT",  SCR_WORKOUT},
+    { 1,  0, "CARDIO",   SCR_CARDIO},
+    { 0,  1, "STATS",    SCR_STATS},
+    {-1,  1, "SLEEP",    SCR_SLEEP},
+    {-1,  0, "WATER",    SCR_WATER},
+    { 0, -1, "CLOCK",    SCR_CLOCK},
+    { 1, -1, "ALERTS",   SCR_NOTIF},
+    { 2, -1, "SETTINGS", SCR_SETTINGS},
+    {-2,  1, "DIAG",     SCR_DIAG},
+};
+static const lv_color_t hc_col[HC_N] = {
+    LV_COLOR_MAKE(0xE6, 0x6C, 0x9B), LV_COLOR_MAKE(0xE6, 0x50, 0x50),
+    LV_COLOR_MAKE(0x5A, 0xC8, 0xD2), LV_COLOR_MAKE(0x9B, 0x6C, 0xE6),
+    LV_COLOR_MAKE(0x1E, 0x96, 0xBE), LV_COLOR_MAKE(0xEB, 0xC8, 0x28),
+    LV_COLOR_MAKE(0x3C, 0xC8, 0x50), LV_COLOR_MAKE(0x8A, 0x94, 0xA8),
+    LV_COLOR_MAKE(0x50, 0x5A, 0x6E),
+};
+static int hc_ox, hc_oy;           /* pan offset of the grid origin */
+static int hc_tx, hc_ty;           /* snap target */
+static int hc_focus;
+static int hc_drag_dist, hc_dragging;
+static lv_obj_t *hc_canvas;
+static lv_point_t hc_press;
+
+static void hc_cell_xy(int i, int *x, int *y)
 {
-    nav_to((scr_t)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)));
+    *x = 120 + hc_ox + HC_W * hc[i].q + HC_W * hc[i].r / 2;
+    *y = 120 + hc_oy + HC_V * hc[i].r;
+}
+
+/* focus = cell nearest the screen centre */
+static int hc_pick_focus(void)
+{
+    int best = 0, bd = 1 << 30;
+    for (int i = 0; i < HC_N; i++) {
+        int x, y;
+        hc_cell_xy(i, &x, &y);
+        int d = (x - 120) * (x - 120) + (y - 120) * (y - 120);
+        if (d < bd) {
+            bd = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+static void hc_draw(lv_event_t *e)
+{
+    lv_layer_t *layer = lv_event_get_layer(e);
+    int focus = hc_pick_focus();
+    hc_focus = focus;
+    /* far cells first so the focused one paints on top */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < HC_N; i++) {
+            if ((pass == 1) != (i == focus))
+                continue;
+            int x, y;
+            hc_cell_xy(i, &x, &y);
+            int d = (x - 120) * (x - 120) + (y - 120) * (y - 120);
+            /* fisheye: 1.25x at centre falling to 0.6x by r=120 */
+            int d2 = d > 14400 ? 14400 : d;
+            int sc = 125 - 65 * d2 / 14400;          /* percent */
+            int r = HC_R * sc / 100;
+            if (x < -r || x > 240 + r || y < -r || y > 240 + r)
+                continue;
+            lv_color_t c = hc_col[i];
+            if (i != focus)
+                c = lv_color_mix(c, lv_color_black(), 150);
+            hex_fill(layer, x, y, r, c);
+            lv_draw_label_dsc_t ld;
+            lv_draw_label_dsc_init(&ld);
+            ld.font = &kenney9;
+            ld.color = i == focus ? lv_color_black() : lv_color_white();
+            ld.align = LV_TEXT_ALIGN_CENTER;
+            ld.text = hc[i].name;
+            lv_area_t a = {x - r, y - 6, x + r, y + 6};
+            lv_draw_label(layer, &ld, &a);
+        }
+    }
+    /* focused app name, big, at the bottom edge */
+    lv_draw_label_dsc_t ld;
+    lv_draw_label_dsc_init(&ld);
+    ld.font = &kenney16;
+    ld.color = hc_col[focus];
+    ld.align = LV_TEXT_ALIGN_CENTER;
+    ld.text = hc[focus].name;
+    lv_area_t a = {0, 214, 239, 236};
+    lv_draw_label(layer, &ld, &a);
+}
+
+static void hc_event(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t *in = lv_indev_active();
+    if (code == LV_EVENT_PRESSED) {
+        hc_drag_dist = 0;
+        hc_dragging = 1;
+        if (in)
+            lv_indev_get_point(in, &hc_press);
+    } else if (code == LV_EVENT_PRESSING && in) {
+        lv_point_t v;
+        lv_indev_get_vect(in, &v);
+        hc_ox += v.x;
+        hc_oy += v.y;
+        hc_drag_dist += (v.x < 0 ? -v.x : v.x) + (v.y < 0 ? -v.y : v.y);
+        lv_obj_invalidate(hc_canvas);
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        hc_dragging = 0;
+        if (hc_drag_dist < 10) {
+            /* tap: open the cell under the finger */
+            int best = -1, bd = 1 << 30;
+            for (int i = 0; i < HC_N; i++) {
+                int x, y;
+                hc_cell_xy(i, &x, &y);
+                int d = (x - hc_press.x) * (x - hc_press.x) +
+                        (y - hc_press.y) * (y - hc_press.y);
+                if (d < bd) {
+                    bd = d;
+                    best = i;
+                }
+            }
+            if (best >= 0 && bd < HC_R * HC_R * 2) {
+                nav_to(hc[best].scr);
+                return;
+            }
+        }
+        /* snap the nearest cell to the centre */
+        int f = hc_pick_focus();
+        hc_tx = hc_ox - (120 + hc_ox + HC_W * hc[f].q + HC_W * hc[f].r / 2 - 120);
+        hc_ty = hc_oy - (HC_V * hc[f].r);
+    }
+}
+
+/* smooth snap toward the target, called from ui_tick */
+static void hc_tick(void)
+{
+    if (!hc_canvas || hc_dragging)
+        return;
+    int dx = hc_tx - hc_ox, dy = hc_ty - hc_oy;
+    if (!dx && !dy)
+        return;
+    hc_ox += dx > 0 ? (dx + 3) / 4 : (dx - 3) / 4;
+    hc_oy += dy > 0 ? (dy + 3) / 4 : (dy - 3) / 4;
+    lv_obj_invalidate(hc_canvas);
 }
 
 static void build_launcher(lv_obj_t *r)
 {
     page_bg(r);
-    mk_header(r, "APPS", 0);
-    static const char *names[6] = {
-        "WORKOUT", "SLEEP", "WATER", "STATS", "SETTINGS", "CLOCK"
-    };
-    static const scr_t scrs[6] = {
-        SCR_WORKOUT, SCR_SLEEP, SCR_WATER, SCR_STATS, SCR_SETTINGS, SCR_CLOCK
-    };
-    for (int i = 0; i < 6; i++) {
-        int x = 14 + (i % 2) * 112, y = 46 + (i / 2) * 62;
-        lv_obj_t *b = mk_btn(r, names[i], x, y, 100, 56, C_FILL, launcher_cb);
-        lv_obj_set_style_radius(b, 14, 0);
-        lv_obj_set_user_data(b, (void *)(intptr_t)scrs[i]);
-    }
-    /* no gesture hint label — keep the panel clean */
+    hc_tx = hc_ox;
+    hc_ty = hc_oy;
+    hc_canvas = lv_obj_create(r);
+    lv_obj_set_pos(hc_canvas, 0, 0);
+    lv_obj_set_size(hc_canvas, 240, 240);
+    lv_obj_set_style_bg_opa(hc_canvas, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(hc_canvas, 0, 0);
+    lv_obj_set_style_pad_all(hc_canvas, 0, 0);
+    lv_obj_remove_flag(hc_canvas, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(hc_canvas, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(hc_canvas, hc_draw, LV_EVENT_DRAW_MAIN, NULL);
+    lv_obj_add_event_cb(hc_canvas, hc_event, LV_EVENT_ALL, NULL);
 }
 
 /* ---- workout -------------------------------------------------------------- */
@@ -642,13 +875,26 @@ static void workout_cb(lv_event_t *e)
         rebuild();
         break;
     case 2:                     /* end */
-        w_last_ms = now - w_start_ms - w_paused_total;
+        w_last_ms = (w_paused ? w_pause_ms : now) - w_start_ms -
+                    w_paused_total;
+        w_last_sets = w_sets;
         w_active = 0;
+        persist_mark();
+        nav_sp = 0;             /* summary returns to the face */
         nav_to(SCR_W_DONE);
         break;
     case 3:
         if (!w_paused) {
-            w_sets++;
+            if (++w_sets >= W_MAX_SETS) {
+                /* last set ends the session */
+                w_last_ms = now - w_start_ms - w_paused_total;
+                w_last_sets = w_sets;
+                w_active = 0;
+                persist_mark();
+                nav_sp = 0;
+                nav_to(SCR_W_DONE);
+                return;
+            }
             rebuild();
         }
         break;
@@ -661,8 +907,15 @@ static void routine_cb(lv_event_t *e)
     start_workout();
 }
 
+static void build_w_run(lv_obj_t *r);
+
 static void build_workout(lv_obj_t *r)
 {
+    if (w_active) {             /* a live session always resumes */
+        cur = SCR_W_RUN;
+        build_w_run(r);
+        return;
+    }
     page_bg(r);
     mk_header(r, "WORKOUT", 1);
     static const char *rt[3] = {"PUSH DAY", "PULL DAY", "LEG DAY"};
@@ -682,13 +935,15 @@ static void build_w_run(lv_obj_t *r)
     static const char *rt[3] = {"PUSH DAY", "PULL DAY", "LEG DAY"};
     mk_header(r, w_routine >= 0 ? rt[w_routine] : "QUICK SESSION", 0);
     char buf[16];
-    fmt_ms(hal_millis() - w_start_ms - w_paused_total, buf);
+    fmt_ms((w_paused ? w_pause_ms : hal_millis()) - w_start_ms -
+           w_paused_total, buf);
     lbl_time_big = mk_label_c(r, &kenney24, C_WHITE, 120, 80, buf);
     char sbuf[24];
-    lv_snprintf(sbuf, sizeof sbuf, "SET %d OF 3", w_sets);
+    lv_snprintf(sbuf, sizeof sbuf, "SET %d OF %d", w_sets + 1, W_MAX_SETS);
     mk_label_c(r, &kenney16, C_MUTED, 120, 116, sbuf);
     lv_obj_t *b;
-    b = mk_btn(r, "SET", 20, 138, 200, 32, C_FILL, workout_cb);
+    b = mk_btn(r, w_sets + 1 >= W_MAX_SETS ? "FINISH SET" : "SET DONE",
+               20, 138, 200, 32, C_FILL, workout_cb);
     lv_obj_set_user_data(b, (void *)(intptr_t)3);
     b = mk_btn(r, w_paused ? "RESUME" : "PAUSE", 20, 178, 97, 42, C_FILL,
                workout_cb);
@@ -705,7 +960,7 @@ static void build_w_done(lv_obj_t *r)
     fmt_ms(w_last_ms, buf);
     mk_label_c(r, &kenney24, C_WHITE, 120, 90, buf);
     char sbuf[24];
-    lv_snprintf(sbuf, sizeof sbuf, "%d SETS DONE", w_sets);
+    lv_snprintf(sbuf, sizeof sbuf, "%d SETS DONE", w_last_sets);
     mk_label_c(r, &kenney16, C_ACCENT, 120, 128, sbuf);
     mk_btn(r, "DONE", 20, 176, 200, 40, C_FILL, back_cb);
 }
@@ -719,6 +974,7 @@ static void sleep_cb(lv_event_t *e)
         s_track ^= 1;
         if (!s_track)
             s_in_bed = 0;
+        persist_mark();
         rebuild();
         return;
     }
@@ -727,6 +983,8 @@ static void sleep_cb(lv_event_t *e)
     if (s_in_bed) {
         s_last_ms = hal_millis() - s_start_ms;
         s_in_bed = 0;
+        persist_mark();
+        nav_sp = 0;
         nav_to(SCR_S_DONE);
     } else {
         s_in_bed = 1;
@@ -746,9 +1004,13 @@ static void build_sleep(lv_obj_t *r)
     else
         fmt_ms(s_last_ms, buf);
     lbl_time_big = mk_label_c(r, &kenney24, C_WHITE, 120, 66, buf);
-    lv_obj_t *b = mk_btn(r, s_in_bed ? "WAKE UP" : "BEDTIME", 20, 108, 200, 52,
-                         s_in_bed ? C_WARN : C_ACCENT, sleep_cb);
-    lv_obj_set_user_data(b, (void *)(intptr_t)1);
+    if (s_track || s_in_bed) {
+        lv_obj_t *b = mk_btn(r, s_in_bed ? "WAKE UP" : "BEDTIME", 20, 108,
+                             200, 52, s_in_bed ? C_WARN : C_ACCENT, sleep_cb);
+        lv_obj_set_user_data(b, (void *)(intptr_t)1);
+    } else {
+        mk_label_c(r, &kenney9, C_MUTED, 120, 128, "TRACKING IS OFF");
+    }
     lv_obj_t *t = mk_toggle(r, s_track ? "TRACKING ON" : "TRACKING OFF",
                             20, 178, 200, s_track, sleep_cb);
     lv_obj_set_user_data(t, (void *)(intptr_t)2);
@@ -770,6 +1032,11 @@ static void build_s_done(lv_obj_t *r)
 static void water_cb(lv_event_t *e)
 {
     water_ml += (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (water_ml < 0)
+        water_ml = 0;
+    if (water_ml > 10000)
+        water_ml = 10000;
+    persist_mark();
     rebuild();
 }
 
@@ -803,7 +1070,7 @@ static void build_clock(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "CLOCK", 1);
-    static const char *tab[3] = {"WATCH", "TIMER", "ALARM"};
+    static const char *tab[3] = {"STOPWATCH", "TIMER", "ALARM"};
     for (int i = 0; i < 3; i++) {
         lv_obj_t *b = mk_btn(r, tab[i], 14 + i * 74, 40, 70, 28,
                              clock_tab == i ? C_ACCENT : C_FILL, clock_cb);
@@ -843,11 +1110,32 @@ static void build_clock(lv_obj_t *r)
             }
         }
     } else {
-        mk_label_c(r, &kenney24, C_WHITE, 120, 88, "07:00");
-        lv_obj_t *b = mk_toggle(r, alarm_on ? "ALARM ON" : "ALARM OFF",
-                                20, 130, 200, alarm_on, clock_cb);
+        char buf[8];
+        lv_snprintf(buf, sizeof buf, "%02d:%02d", alarm_h, alarm_m);
+        if (alarm_ringing) {
+            mk_label_c(r, &kenney24, C_WARN, 120, 84, buf);
+            lv_obj_t *b = mk_btn(r, "STOP", 20, 130, 200, 44, C_WARN,
+                                 clock_cb);
+            lv_obj_set_user_data(b, (void *)(intptr_t)15);
+            return;
+        }
+        lv_obj_t *b;
+        b = mk_btn(r, "-", 14, 78, 40, 36, C_FILL, clock_cb);
+        lv_obj_set_user_data(b, (void *)(intptr_t)40);
+        mk_label_c(r, &kenney24, C_WHITE, 120, 84, buf);
+        b = mk_btn(r, "+", 186, 78, 40, 36, C_FILL, clock_cb);
+        lv_obj_set_user_data(b, (void *)(intptr_t)41);
+        b = mk_btn(r, "-15", 14, 120, 40, 28, C_FILL, clock_cb);
+        lv_obj_set_user_data(b, (void *)(intptr_t)42);
+        b = mk_btn(r, "+15", 186, 120, 40, 28, C_FILL, clock_cb);
+        lv_obj_set_user_data(b, (void *)(intptr_t)43);
+        mk_label_c(r, &kenney9, C_MUTED, 120, 128, "HOUR / 15 MIN");
+        b = mk_toggle(r, alarm_on ? "ALARM ON" : "ALARM OFF",
+                      20, 160, 200, alarm_on, clock_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)14);
-        mk_label_c(r, &kenney9, C_MUTED, 120, 186, "VIBRATES UNTIL BUTTON");
+        mk_label_c(r, &kenney9, C_MUTED, 120, 200,
+                   hal_clock_synced() ? "VIBRATES UNTIL STOPPED"
+                                      : "SET THE TIME FIRST");
     }
 }
 
@@ -868,7 +1156,16 @@ static void clock_cb(lv_event_t *e)
     case 11: sw_running = 0; sw_acc = 0; break;
     case 12: timer_done = 0; break;
     case 13: timer_end_ms = 0; break;
-    case 14: alarm_on ^= 1; break;
+    case 14: alarm_on ^= 1; persist_mark(); break;
+    case 15:
+        alarm_ringing = 0;
+        hal_motor(0);
+        motor_off_at = 0;
+        break;
+    case 40: alarm_h = (alarm_h + 23) % 24; persist_mark(); break;
+    case 41: alarm_h = (alarm_h + 1) % 24; persist_mark(); break;
+    case 42: alarm_m = (alarm_m + 45) % 60; persist_mark(); break;
+    case 43: alarm_m = (alarm_m + 15) % 60; persist_mark(); break;
     case 30: timer_end_ms = now + 60000; break;
     case 31: timer_end_ms = now + 300000; break;
     case 32: timer_end_ms = now + 600000; break;
@@ -893,14 +1190,14 @@ static void build_settings(lv_obj_t *r)
                     brightness, !(cc_hide & 1), !(cc_hide & 2),
                     !(cc_hide & 4), 1};
     for (int i = 0; i < 10; i++) {
-        int y = 42 + i * 19;
+        int y = 40 + i * 18;
         mk_label(r, &kenney9, C_WHITE, 18, y, rows[i]);
         char v[8];
         if (i == 5)
             lv_snprintf(v, sizeof v, "%d%%", brightness);
         else
             lv_snprintf(v, sizeof v, "%s", vals[i] ? "ON" : "OFF");
-        lv_obj_t *b = mk_btn(r, i == 9 ? ">" : v, 158, y - 6, 64, 22,
+        lv_obj_t *b = mk_btn(r, i == 9 ? ">" : v, 158, y - 4, 64, 17,
                              vals[i] ? C_ACCENT : C_FILL, settings_cb);
         lv_obj_set_style_text_color(lv_obj_get_child(b, 0),
                                     vals[i] ? C_BG : C_MUTED, 0);
@@ -911,7 +1208,7 @@ static void build_settings(lv_obj_t *r)
     int st = ble_status();
     char fb[40];
     lv_snprintf(fb, sizeof fb, "%s  DIAG >", bs[st < 0 || st > 4 ? 4 : st]);
-    lv_obj_t *db = mk_btn(r, fb, 30, 226, 180, 14, C_BG, diag_open_cb);
+    lv_obj_t *db = mk_btn(r, fb, 30, 224, 180, 16, C_BG, diag_open_cb);
     lv_obj_set_style_border_width(db, 0, 0);
     lv_obj_set_style_text_font(lv_obj_get_child(db, 0), &kenney9, 0);
     lv_obj_set_style_text_color(lv_obj_get_child(db, 0),
@@ -1000,7 +1297,7 @@ static void settings_cb(lv_event_t *e)
         return;
     }
     rebuild();
-    persist_save();
+    persist_mark();
 }
 
 /* ---- stats ------------------------------------------------------------------- */
@@ -1022,7 +1319,7 @@ static void ppg_draw(lv_event_t *ev)
     dsc.width = 2;
     int prev_y = mid - y100 * half / 100;
     for (int x = x0 + 1; x <= x1; x++) {
-        sensors_ppg((x - x0) * 128 / (x1 - x0), &y100);
+        sensors_ppg((x - x0) * 127 / (x1 - x0), &y100);
         int y = mid - y100 * half / 100;
         dsc.p1.x = x - 1;
         dsc.p1.y = prev_y;
@@ -1095,12 +1392,16 @@ static void build_stats(lv_obj_t *r)
     lv_obj_set_style_pad_all(bar, 0, 0);
     lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     mk_label(bar, &kenney9, C_MUTED, 8, 9,
-             w_active ? "WORKOUT LIVE" : "WORKOUT");
+             w_active ? "WORKOUT LIVE" : "LAST WORKOUT");
     if (w_active) {
         lv_snprintf(buf, sizeof buf, "%d SETS", w_sets);
         mk_label(bar, &kenney9, C_ACCENT, 140, 9, buf);
+    } else if (w_last_ms) {
+        lv_snprintf(buf, sizeof buf, "%uM  %d SETS",
+                    (unsigned)(w_last_ms / 60000u), w_last_sets);
+        mk_label(bar, &kenney9, C_ACCENT, 120, 9, buf);
     } else {
-        mk_label(bar, &kenney9, C_MUTED, 152, 9, "NO SAVE");
+        mk_label(bar, &kenney9, C_MUTED, 160, 9, "NONE");
     }
 }
 
@@ -1118,32 +1419,50 @@ const struct ancs_notif_view *ancs_get(int i);
 void ancs_dismiss(uint32_t uid);
 void ancs_positive(uint32_t uid);
 
-static int notif_sel = -1;         /* -1 = list, >=0 = detail view */
-static int notif_reply;            /* 1 = quick-reply picker open */
+/* selection is by uid (declared near the nav stack), never by list
+   index: the list reorders as notifications arrive and clear */
+static int notif_reply;            /* 1 = action confirm open */
+
+static void notif_reset_view(void)
+{
+    notif_sel_uid = 0;
+    notif_reply = 0;
+}
+
+static const struct ancs_notif_view *notif_selected(void)
+{
+    for (int i = 0; i < ancs_count(); i++) {
+        const struct ancs_notif_view *v = ancs_get(i);
+        if (v && v->uid == notif_sel_uid)
+            return v;
+    }
+    return NULL;
+}
 
 static void notif_item_cb(lv_event_t *e)
 {
-    notif_sel = (int)(intptr_t)lv_obj_get_user_data(
-        lv_event_get_target(e));
-    rebuild();
+    int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    const struct ancs_notif_view *v = ancs_get(i);
+    if (v) {
+        notif_sel_uid = v->uid;
+        rebuild();
+    }
 }
 
 static void notif_back_cb(lv_event_t *e)
 {
     (void)e;
-    notif_sel = -1;
-    notif_reply = 0;
+    notif_reset_view();
     rebuild();
 }
 
 static void notif_dismiss_cb(lv_event_t *e)
 {
     (void)e;
-    const struct ancs_notif_view *v = ancs_get(notif_sel);
+    const struct ancs_notif_view *v = notif_selected();
     if (v)
         ancs_dismiss(v->uid);
-    notif_sel = -1;
-    notif_reply = 0;
+    notif_reset_view();
     rebuild();
 }
 
@@ -1157,13 +1476,12 @@ static void notif_reply_cb(lv_event_t *e)
 static void notif_send_cb(lv_event_t *e)
 {
     (void)e;
-    /* ActionIDPositive fires the notification's reply action on the
-       phone — for Messages that hands off to iOS to handle the text */
-    const struct ancs_notif_view *v = ancs_get(notif_sel);
+    /* ANCS has one positive action per notification (Reply / Answer /
+       Open); it carries no text, so the watch can only trigger it */
+    const struct ancs_notif_view *v = notif_selected();
     if (v)
         ancs_positive(v->uid);
-    notif_sel = -1;
-    notif_reply = 0;
+    notif_reset_view();
     rebuild();
 }
 
@@ -1171,11 +1489,11 @@ static void build_notif(lv_obj_t *r)
 {
     page_bg(r);
 
-    if (notif_sel >= 0) {
+    if (notif_sel_uid) {
         /* detail: app + title + body, actions at the bottom */
-        const struct ancs_notif_view *v = ancs_get(notif_sel);
+        const struct ancs_notif_view *v = notif_selected();
         if (!v) {
-            notif_sel = -1;
+            notif_reset_view();
             rebuild();
             return;
         }
@@ -1190,19 +1508,21 @@ static void build_notif(lv_obj_t *r)
         lv_obj_set_width(m, 208);
         lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
 
+        char ago[16];
+        unsigned mins = (hal_millis() - v->rx_ms) / 60000u;
+        lv_snprintf(ago, sizeof ago, mins ? "%uM AGO" : "JUST NOW", mins);
+        mk_label(r, &kenney9, C_MUTED, 160, 16, ago);
         if (notif_reply) {
-            /* canned replies — sent as the notification's positive
-               action; real typed replies need a companion relay */
-            static const char *qr[4] = {"OK", "YES", "NO", "CALL YOU"};
-            for (int i = 0; i < 4; i++) {
-                lv_obj_t *b = mk_btn(r, qr[i], 16 + (i % 2) * 106,
-                                     152 + (i / 2) * 40, 100, 34,
-                                     C_FILL, notif_send_cb);
-                lv_obj_set_user_data(b, (void *)(intptr_t)i);
-            }
+            mk_label_c(r, &kenney9, C_MUTED, 120, 158,
+                       "OPEN ON PHONE AND REPLY?");
+            mk_btn(r, "YES", 16, 186, 100, 34, C_ACCENT, notif_send_cb);
+            mk_btn(r, "NO", 124, 186, 100, 34, C_FILL, notif_back_cb);
         } else {
-            mk_btn(r, "REPLY", 16, 186, 100, 34, C_FILL, notif_reply_cb);
-            mk_btn(r, "DISMISS", 124, 186, 100, 34, C_FILL,
+            if (v->has_pos)
+                mk_btn(r, "REPLY", 16, 186, 100, 34, C_FILL,
+                       notif_reply_cb);
+            mk_btn(r, "DISMISS", v->has_pos ? 124 : 16,
+                   186, v->has_pos ? 100 : 208, 34, C_FILL,
                    notif_dismiss_cb);
         }
         return;
@@ -1245,7 +1565,9 @@ static void build_notif(lv_obj_t *r)
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_user_data(row, (void *)(intptr_t)i);
         lv_obj_add_event_cb(row, notif_item_cb, LV_EVENT_CLICKED, NULL);
-        /* unread marker */
+        /* accent dot for notifications that alerted (not silent) */
+        if (v->flags & 0x01)
+            goto labels;
         lv_obj_t *dot = lv_obj_create(row);
         lv_obj_set_pos(dot, 8, 18);
         lv_obj_set_size(dot, 7, 7);
@@ -1255,6 +1577,7 @@ static void build_notif(lv_obj_t *r)
         lv_obj_set_style_border_width(dot, 0, 0);
         lv_obj_remove_flag(dot,
                            LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+labels:
         mk_label(row, &kenney9, C_MUTED, 24, 6,
                  v->app[0] ? v->app : "APP");
         lv_obj_t *tl = mk_label(row, &kenney16, C_WHITE, 24, 20,
@@ -1368,6 +1691,7 @@ static void rebuild(void)
     cardio_trace = NULL;
     cardio_bpm = NULL;
     diag_lbl = NULL;
+    hc_canvas = NULL;
     switch (cur) {
     case SCR_FACE:      ui_face_build(root); break;
     case SCR_LAUNCHER:  build_launcher(root); break;
@@ -1424,7 +1748,10 @@ void ui_tick(void)
         !ble_dfu_busy()) {
         asleep = 1;
         display_backlight(0);
-        persist_save();
+        display_sleep(1);
+        touch_sleep(1);
+        if (persist_dirty)
+            persist_save();
     }
     /* raise-to-wake: the Bosch engine's wrist-wear flag is the primary
        detector; if the engine never loaded, fall back to a sustained
@@ -1465,14 +1792,20 @@ void ui_tick(void)
     if (was_held && !held) {
         if (asleep)
             ui_wake();
-        else if (water_lock)
-            ; /* ignore */
-        else if (cur == SCR_FACE)
+        else if (water_lock) {
+            /* the button is the way out of water lock */
+            water_lock = 0;
+            hal_motor(1);
+            motor_off_at = now + 120;
+            rebuild();
+        } else if (cur == SCR_FACE)
             nav_to(SCR_LAUNCHER);
         else if (cur == SCR_LAUNCHER)
             nav_to(SCR_CC);
+        else if (cur == SCR_CC)
+            nav_to(SCR_FACE);
         else
-            nav_to(back_target);
+            nav_back();
     }
     was_held = held != 0;
     sensors_tick(now);
@@ -1499,15 +1832,40 @@ void ui_tick(void)
     }
     if (cur == SCR_NOTIF && ancs_take_dirty())
         rebuild();
-    /* resting HR = lowest sustained reading this session */
+    /* resting HR = lowest reading this session outside workouts */
     {
         int b = sensors_bpm();
-        if (b > 0 && (resting_bpm == 0 || b < resting_bpm))
+        if (b > 0 && !w_active && (resting_bpm == 0 || b < resting_bpm))
             resting_bpm = b;
     }
+    /* alarm: once per matching minute, buzz in 500 ms pulses until STOP */
+    if (alarm_on && hal_clock_synced()) {
+        int mod = hal_clock_hour() * 60 + hal_clock_minute();
+        if (mod == alarm_h * 60 + alarm_m && alarm_fired_min != mod) {
+            alarm_fired_min = mod;
+            alarm_ringing = 1;
+            clock_tab = 2;
+            if (asleep)
+                ui_wake();
+            nav_sp = 0;
+            nav_to(SCR_CLOCK);
+        }
+        if (mod != alarm_h * 60 + alarm_m)
+            alarm_fired_min = -1;
+    }
+    if (alarm_ringing) {
+        hal_motor((now / 500) & 1);
+        last_input_ms = now;     /* never sleep through it */
+    }
+    /* deferred flash write: 2 s after the last change, or on sleep */
+    if (persist_dirty && now - persist_dirty_ms > 2000)
+        persist_save();
     switch (cur) {
     case SCR_FACE:
         ui_face_tick();
+        break;
+    case SCR_LAUNCHER:
+        hc_tick();
         break;
     case SCR_DIAG: {
         static uint32_t last_d;
@@ -1529,10 +1887,16 @@ void ui_tick(void)
             static int last_bpm = -2;
             int bpm = sensors_bpm();
             if (bpm != last_bpm) {
+                int mode_change = (bpm > 0) != (last_bpm > 0) ||
+                                  (bpm < 0) != (last_bpm < 0);
                 last_bpm = bpm;
-                char buf[16];
-                lv_snprintf(buf, sizeof buf, "%d", bpm > 0 ? bpm : 0);
-                lv_label_set_text(cardio_bpm, bpm > 0 ? buf : "--");
+                if (mode_change) {
+                    rebuild();       /* sub-label changes too */
+                } else {
+                    char buf[16];
+                    lv_snprintf(buf, sizeof buf, "%d", bpm);
+                    lv_label_set_text(cardio_bpm, buf);
+                }
             }
         }
         break;

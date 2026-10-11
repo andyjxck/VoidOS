@@ -29,6 +29,17 @@ static void spi_tx_raw(const uint8_t *p, unsigned len)
     }
 }
 
+/* The LCD shares SPIM0 with the SPI flash. CS must be released after
+   every LCD transaction or flash traffic (WREN/erase/program/RDSR)
+   is clocked into the panel as commands. */
+static void lcd_select(int on)
+{
+    if (on)
+        GPIO_OUTCLR = BIT(PIN_LCD_CS);
+    else
+        GPIO_OUTSET = BIT(PIN_LCD_CS);
+}
+
 static void lcd_cmd(uint8_t cmd)
 {
     GPIO_OUTCLR = BIT(PIN_LCD_DC);
@@ -68,23 +79,41 @@ void display_init(void)
     SPIM0_CONFIG = 0x6;        /* mode 3, MSB first */
     SPIM0_ENABLE = 7;
 
-    GPIO_OUTCLR = BIT(PIN_LCD_CS);
     GPIO_OUTCLR = BIT(PIN_LCD_RST);
     hal_delay_ms(10);
     GPIO_OUTSET = BIT(PIN_LCD_RST);
     hal_delay_ms(120);
 
+    lcd_select(1);
     lcd_cmd(0x11); hal_delay_ms(120);  /* SLPOUT */
     lcd_cmd(0x3A); lcd_byte(0x55);     /* 16-bit colour */
     lcd_cmd(0x36); lcd_byte(0x00);     /* MADCTL */
     lcd_cmd(0x21);                     /* INVON */
     lcd_cmd(0x13);                     /* NORON */
     lcd_cmd(0x29); hal_delay_ms(20);   /* DISPON */
+    lcd_select(0);
+}
+
+/* panel sleep: SLPIN cuts the LCD's own draw current while the watch
+   is idle; SLPOUT needs 120 ms before pixels are valid again */
+void display_sleep(int on)
+{
+    lcd_select(1);
+    if (on) {
+        lcd_cmd(0x28);                 /* DISPOFF */
+        lcd_cmd(0x10);                 /* SLPIN */
+    } else {
+        lcd_cmd(0x11);                 /* SLPOUT */
+        hal_delay_ms(120);
+        lcd_cmd(0x29);                 /* DISPON */
+    }
+    lcd_select(0);
 }
 
 /* solid fill — used to probe the panel's real RAM extents */
 void display_fill(int x0, int y0, int x1, int y1, uint16_t c)
 {
+    lcd_select(1);
     lcd_window((uint16_t)x0, (uint16_t)y0, (uint16_t)x1, (uint16_t)y1);
     GPIO_OUTSET = BIT(PIN_LCD_DC);
     unsigned left = (unsigned)(x1 - x0 + 1) * (unsigned)(y1 - y0 + 1);
@@ -101,10 +130,12 @@ void display_fill(int x0, int y0, int x1, int y1, uint16_t c)
         for (unsigned spin = 0; !SPIM0_EVENTS_END; spin++)
             if (spin > 4000000) {
                 SPIM0_STOP = 1;
+                lcd_select(0);
                 return;
             }
         left -= n;
     }
+    lcd_select(0);
 }
 
 void display_backlight(int level) /* 0..3 */
@@ -116,29 +147,30 @@ void display_backlight(int level) /* 0..3 */
     if (level >= 3) GPIO_OUTCLR = BIT(PIN_BL_H);
 }
 
-/* LVGL flush: RGB565 px data (native byte order), w*h pixels. */
+/* LVGL flush: px is RGB565 already byte-swapped by LVGL
+   (LV_COLOR_FORMAT_RGB565_SWAPPED), so it streams straight to the
+   panel in <=255-byte DMA chunks — no copy, no per-pixel swap. */
 void display_send(int x0, int y0, int x1, int y1, const uint16_t *px)
 {
+    lcd_select(1);
     lcd_window((uint16_t)x0, (uint16_t)y0, (uint16_t)x1, (uint16_t)y1);
     GPIO_OUTSET = BIT(PIN_LCD_DC);
-    unsigned left = (unsigned)(x1 - x0 + 1) * (unsigned)(y1 - y0 + 1);
+    const uint8_t *p = (const uint8_t *)px;
+    unsigned left = (unsigned)(x1 - x0 + 1) * (unsigned)(y1 - y0 + 1) * 2u;
     while (left) {
-        unsigned n = left > SPI_CHUNK / 2 ? SPI_CHUNK / 2 : left;
-        for (unsigned i = 0; i < n; i++) {
-            dma_buf[2 * i] = (uint8_t)(px[i] >> 8);
-            dma_buf[2 * i + 1] = (uint8_t)px[i];
-        }
-        px += n;
-        left -= n;
+        unsigned n = left > SPI_CHUNK ? SPI_CHUNK : left;
         SPIM0_EVENTS_END = 0;
-        SPIM0_TXD_PTR = (uint32_t)dma_buf;
-        SPIM0_TXD_MAXCNT = n * 2;
+        SPIM0_TXD_PTR = (uint32_t)p;
+        SPIM0_TXD_MAXCNT = n;
         SPIM0_RXD_MAXCNT = 0;
         SPIM0_START = 1;
+        p += n;
+        left -= n;
         for (unsigned spin = 0; !SPIM0_EVENTS_END; spin++) {
             wdt_kick();
             if (spin > 4000000)
                 fault_blink(3);
         }
     }
+    lcd_select(0);
 }

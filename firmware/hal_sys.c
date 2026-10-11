@@ -544,12 +544,28 @@ int touch_sample(int *x, int *y)
 {
     if (!touch_ok)
         return 0;
+    /* Read the chip only when it raised INT or a finger is down, plus a
+       100 ms safety poll. Reading it every loop iteration (~200/s) was
+       hogging TWIM1 away from the sensors and exposing the bus wedge. */
+    static uint32_t last_forced;
+    static int bad_reads;
+    uint32_t now = millis_raw();
+    if (!touch_was_down && !(GPIO_LATCH & BIT(PIN_TP_INT)) &&
+        now - last_forced < 100) {
+        *x = touch_diag.last_x;
+        *y = touch_diag.last_y;
+        return 0;
+    }
+    last_forced = now;
     uint8_t d[7];
     if (!i2c_read_reg(CST816_ADDR, 0x00, d, 7)) {
         *x = touch_diag.last_x;
         *y = touch_diag.last_y;
+        if (++bad_reads > 3)              /* don't hold a phantom press */
+            touch_was_down = 0;
         return touch_was_down;
     }
+    bad_reads = 0;
     /* Gesture IDs persist in d[1] forever; the INT latch marks fresh
        pulses. Use both: a changed nonzero ID = new gesture even if the
        latch missed the pulse. Re-arm on finger-up so repeats re-fire. */
@@ -583,8 +599,26 @@ int touch_sample(int *x, int *y)
     return touch_was_down;
 }
 
-/* CST816S gesture register (0x01): 1=up 2=down 3=left 4=right 5=dbl-click
-   0x0B=long-press 0x0C=single-click. Returns and clears the latest ID. */
+/* CST816S gesture register (0x01): 1=up 2=down 3=left 4=right
+   5=single-tap 0x0B=double-tap 0x0C=long-press. Returns and clears the latest ID. */
+/* CST816S low-power mode while the display is off; INT still fires on
+   a touch so the wake path keeps working */
+void touch_sleep(int on)
+{
+    if (!touch_ok)
+        return;
+    if (on)
+        i2c_write_reg(CST816_ADDR, 0xA5, 0x03);
+    else {
+        /* only a reset pulse wakes it: toggle the TP reset line */
+        GPIO_OUTCLR = BIT(PIN_TP_RESET);
+        hal_delay_ms(5);
+        GPIO_OUTSET = BIT(PIN_TP_RESET);
+        hal_delay_ms(50);
+        i2c_write_reg(CST816_ADDR, 0xA5, 0x00);
+    }
+}
+
 int touch_gesture(void)
 {
     int g = last_gesture;

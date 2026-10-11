@@ -21,7 +21,7 @@ uint32_t hal_millis(void);
 /* ANCS UUIDs, wire order (little-endian, reversed from canonical) */
 static const ble_uuid128_t uuid_ancs = BLE_UUID128_INIT(
     0xd0, 0x00, 0x2d, 0x12, 0x1e, 0x4b, 0x0f, 0xa4,
-    0x99, 0x4e, 0xce, 0xb5, 0x51, 0xf6, 0x05, 0x79);
+    0x99, 0x4e, 0xce, 0xb5, 0x31, 0xf4, 0x05, 0x79);
 static const ble_uuid128_t uuid_ns = BLE_UUID128_INIT(
     0xbd, 0x1d, 0xa2, 0x99, 0xe6, 0x25, 0x58, 0x8c,
     0xd9, 0x42, 0x01, 0x63, 0x0d, 0x12, 0xbf, 0x9f);
@@ -239,7 +239,9 @@ static void on_ns(const uint8_t *d, int len)
 
 void ancs_on_notify(uint16_t attr_handle, struct os_mbuf *om)
 {
-    uint8_t d[64];
+    /* DS PDUs run to MTU-3 (~250 B) — never clip them to a small stack
+       buffer or the attribute framing falls apart */
+    uint8_t d[256];
     int len = OS_MBUF_PKTLEN(om);
     if (len > (int)sizeof d)
         len = sizeof d;
@@ -252,18 +254,52 @@ void ancs_on_notify(uint16_t attr_handle, struct os_mbuf *om)
 
 /* ---- discovery state machine --------------------------------------------- */
 
+static int sub_fail;                /* diag: last CCCD write error */
 static int sub_done(uint16_t conn, const struct ble_gatt_error *err,
-                    struct ble_gatt_attr *attr, void *arg)
+                    struct ble_gatt_attr *attr, void *arg);
+
+static int ds_sub_done(uint16_t conn, const struct ble_gatt_error *err,
+                       struct ble_gatt_attr *attr, void *arg)
 {
-    (void)conn; (void)err; (void)attr; (void)arg;
-    if (state == ST_SUB_NS) {
-        state = ST_SUB_DS;
-        uint8_t on[2] = {1, 0};
-        ble_gattc_write_flat(a_conn, h_ds_cccd, on, 2, NULL, NULL);
-        state = ST_LIVE;             /* DS sub is best-effort */
+    (void)conn; (void)attr; (void)arg;
+    if (err->status == 0) {
+        state = ST_LIVE;
+        notif_dirty = 1;
+    } else {
+        sub_fail = err->status;
+        state = ST_SUB_NS;           /* retried from ancs_tick / enc_ok */
+        disc_retry_at = hal_millis() + 1500;
     }
     return 0;
 }
+
+static void subscribe_ns(void)
+{
+    uint8_t on[2] = {1, 0};
+    state = ST_SUB_NS;
+    ble_gattc_write_flat(a_conn, h_ns_cccd, on, 2, sub_done, NULL);
+}
+
+static int sub_done(uint16_t conn, const struct ble_gatt_error *err,
+                    struct ble_gatt_attr *attr, void *arg)
+{
+    (void)conn; (void)attr; (void)arg;
+    if (err->status != 0) {
+        /* 0x05/0x0F = not yet paired/encrypted: iOS pairs us now and
+           ENC_CHANGE re-arms the subscribe; anything else -> retry */
+        sub_fail = err->status;
+        disc_retry_at = hal_millis() + 1500;
+        return 0;
+    }
+    state = ST_SUB_DS;
+    uint8_t on[2] = {1, 0};
+    if (h_ds_cccd)
+        ble_gattc_write_flat(a_conn, h_ds_cccd, on, 2, ds_sub_done, NULL);
+    else
+        state = ST_LIVE;
+    return 0;
+}
+int ancs_sub_fail(void) { return sub_fail; }
 
 static int dsc_cb(uint16_t conn, const struct ble_gatt_error *error,
                   uint16_t chr_val_handle,
@@ -272,9 +308,10 @@ static int dsc_cb(uint16_t conn, const struct ble_gatt_error *error,
     (void)conn; (void)arg;
     if (error->status == BLE_HS_EDONE) {
         /* subscribe Notification Source first; Data Source after */
-        state = ST_SUB_NS;
-        uint8_t on[2] = {1, 0};
-        ble_gattc_write_flat(a_conn, h_ns_cccd, on, 2, sub_done, NULL);
+        if (h_ns_cccd)
+            subscribe_ns();
+        else
+            state = ST_IDLE;
         return 0;
     }
     if (error->status != 0 || !dsc)
@@ -358,6 +395,7 @@ void ancs_on_connect(uint16_t conn)
 
 void ancs_on_disconnect(void)
 {
+    a_conn = 0;
     state = ST_IDLE;
     cts_state = 0;
     cts_pending_at = 0;
@@ -371,10 +409,8 @@ void ancs_on_enc_ok(void)
 {
     if (state == ST_IDLE)
         ancs_begin();
-    else if (state == ST_SUB_NS || (state == ST_LIVE && h_ns_cccd)) {
-        uint8_t on[2] = {1, 0};
-        ble_gattc_write_flat(a_conn, h_ns_cccd, on, 2, sub_done, NULL);
-    }
+    else if (state == ST_SUB_NS && h_ns_cccd)
+        subscribe_ns();
     if (cts_state != 3)
         cts_pending_at = hal_millis() + 1500;
 }
@@ -475,7 +511,18 @@ void ancs_tick(void)
     if (state > ST_IDLE && state < ST_LIVE && disc_retry_at &&
         hal_millis() > disc_retry_at) {
         disc_retry_at = hal_millis() + 12000;
-        if (a_conn)
-            ble_gattc_disc_svc_by_uuid(a_conn, &uuid_ancs.u, svc_cb, NULL);
+        if (state == ST_SUB_NS && h_ns_cccd)
+            subscribe_ns();          /* resubscribe after an auth bounce */
+        else
+            ancs_begin();            /* discovery stalled: start over */
+    }
+    /* CTS: retry a failed read every 10 s while connected + idle */
+    if (cts_state == 0 && !cts_pending_at && a_conn &&
+        (state == ST_LIVE || state == ST_IDLE)) {
+        static uint32_t cts_last_try;
+        if (hal_millis() - cts_last_try > 10000) {
+            cts_last_try = hal_millis();
+            cts_pending_at = hal_millis() + 200;
+        }
     }
 }

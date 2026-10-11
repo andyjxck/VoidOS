@@ -14,6 +14,7 @@
 
 int i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *dst, unsigned n);
 int i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val);
+uint32_t hal_millis_raw(void);
 
 #define BMA_ADDR 0x18
 #define HRS_ADDR 0x44
@@ -49,12 +50,15 @@ static void bma_init(void)
        then start the ASIC so features come alive. Register-level
        sequence mirrors the published sensor driver. */
     i2c_write_reg(BMA_ADDR, 0x59, 0x00);      /* INIT_CTRL: halt loader */
-    for (unsigned i = 0; i < BMA_CFG_SIZE; i += 16) {
-        i2c_write_reg(BMA_ADDR, 0x5B, (i / 2) & 0x0F);
-        i2c_write_reg(BMA_ADDR, 0x5C, (i / 2) >> 4);
+    int stream_ok = 1;
+    for (unsigned i = 0; i < BMA_CFG_SIZE && stream_ok; i += 16) {
+        stream_ok &= i2c_write_reg(BMA_ADDR, 0x5B, (i / 2) & 0x0F);
+        stream_ok &= i2c_write_reg(BMA_ADDR, 0x5C, (i / 2) >> 4);
         unsigned n = BMA_CFG_SIZE - i < 16 ? BMA_CFG_SIZE - i : 16;
-        i2c_write_regs(BMA_ADDR, 0x5E, bma_cfg + i, n);
+        stream_ok &= i2c_write_regs(BMA_ADDR, 0x5E, bma_cfg + i, n);
     }
+    if (!stream_ok)
+        bma_feat |= 8;                        /* diag: a chunk was dropped */
     i2c_write_reg(BMA_ADDR, 0x59, 0x01);      /* start the ASIC */
     uint8_t stat = 0;
     for (int t = 0; t < 12; t++) {            /* poll up to ~600 ms */
@@ -68,10 +72,16 @@ static void bma_init(void)
         /* enable on-chip features: byte 0x3B bit4 = step counter,
            byte 0x40 bit0 = wrist-wear (raise gesture) */
         uint8_t feat[70];
+        /* the feature block lives at RAM index 0: re-point the index
+           registers, which the stream loop left at the last chunk */
+        i2c_write_reg(BMA_ADDR, 0x5B, 0x00);
+        i2c_write_reg(BMA_ADDR, 0x5C, 0x00);
         if (i2c_read_reg(BMA_ADDR, 0x5E, feat, 70)) {
             bma_feat |= 1;
             feat[0x3B] |= 0x10;
             feat[0x40] |= 0x01;
+            i2c_write_reg(BMA_ADDR, 0x5B, 0x00);
+            i2c_write_reg(BMA_ADDR, 0x5C, 0x00);
             if (i2c_write_regs(BMA_ADDR, 0x5E, feat, 70)) {
                 bma_feat |= 2;
                 bma_engine = 1;
@@ -146,7 +156,7 @@ static void bma_sample(uint32_t now)
 /* ---- HRS3300 ----------------------------------------------------------- */
 
 static int hrs_ok;
-static int32_t hrs_raw;                  /* last raw sample, for diag */
+static int32_t hrs_raw, hrs_als;         /* last raw samples, for diag */
 static int32_t dc, ac_f;                 /* DC estimate, filtered AC */
 static uint32_t beats;                   /* analysis windows run (diag) */
 static uint32_t last_ibi;                /* diag: last spectrum SNR x10 */
@@ -176,7 +186,7 @@ static int spec_n, spec_reset = 1;
 static float hra[20];
 static int hra_i;
 static float last_snr;
-static float cand_hz[6];
+static float cand_hz[8];
 static int cand_n;
 static int last_pk_bpm;      /* diag: raw-frame peak, whether accepted or not */
 
@@ -227,25 +237,39 @@ static int hr_analyse(void)
         vre[i] = (float)daq[i];
         vim[i] = 0;
     }
-    /* detrend (linear ramp) then first-difference */
-    float off = vre[0];
-    float slope = (vre[HR_N - 1] - off) / (HR_N - 1);
-    for (int i = 0; i < HR_N; i++)
-        vre[i] -= slope * i + off;
-    for (int i = 0; i < HR_N - 1; i++)
-        vre[i] = vre[i + 1] - vre[i];
-    vre[HR_N - 1] = 0;
-    /* bandpass: LP ~4 Hz x4 then HP ~0.5 Hz x4 */
-    for (int p = 0; p < 4; p++) {
-        float e = vre[0];
-        for (int i = 0; i < HR_N; i++)
-            vre[i] = e = 0.816f * vre[i] + 0.184f * e;
-    }
-    for (int p = 0; p < 4; p++) {
-        float e = vre[0];
+    /* 2nd-order HP (~0.5 Hz) -> AGC -> 2nd-order LP (~4 Hz) at 10 Hz,
+       the filter chain that is known to work on this sensor. No
+       differentiation: that tilted the spectrum toward HF noise. */
+    {
+        float x1 = vre[0], x2 = vre[0], y1 = 0, y2 = 0;
         for (int i = 0; i < HR_N; i++) {
-            e = 0.268f * vre[i] + 0.732f * e;
-            vre[i] -= e;
+            float x = vre[i];
+            float y = 0.8703f * x - 1.7407f * x1 + 0.8703f * x2 +
+                      1.7238f * y1 - 0.7575f * y2;
+            x2 = x1; x1 = x; y2 = y1; y1 = y;
+            vre[i] = y;
+        }
+    }
+    {
+        /* AGC: normalise the window to a ~100-count envelope */
+        float pk = 1.0f;
+        for (int i = 0; i < HR_N; i++) {
+            float a = vre[i] < 0 ? -vre[i] : vre[i];
+            if (a > pk)
+                pk = a;
+        }
+        float g = 100.0f / pk;
+        for (int i = 0; i < HR_N; i++)
+            vre[i] *= g;
+    }
+    {
+        float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+        for (int i = 0; i < HR_N; i++) {
+            float x = vre[i];
+            float y = 0.1160f * x + 0.2319f * x1 + 0.1160f * x2 +
+                      0.7217f * y1 - 0.1855f * y2;
+            x2 = x1; x1 = x; y2 = y1; y1 = y;
+            vre[i] = y;
         }
     }
     for (int i = 0, h = 0; i < HR_N; i++) {
@@ -288,31 +312,32 @@ static int hr_analyse(void)
     last_pk_bpm = (int)(pk_hz * 60.0f + 0.5f);
     /* consistency path: a real pulse repeats. Three consecutive frames
        whose peaks agree within 8% count even if SNR is mediocre */
-    if (snr >= 2.6f && pk_hz >= 40.0f / 60.0f && pk_hz <= 200.0f / 60.0f) {
-        if (cand_n == 6) {
-            for (int i = 0; i < 5; i++)
+    if (snr >= 3.0f && pk_hz >= 40.0f / 60.0f && pk_hz <= 200.0f / 60.0f) {
+        if (cand_n == 8) {
+            for (int i = 0; i < 7; i++)
                 cand_hz[i] = cand_hz[i + 1];
-            cand_n = 5;
+            cand_n = 7;
         }
         cand_hz[cand_n++] = pk_hz;
     } else {
         cand_n = 0;
     }
-    if (cand_n >= 5) {
+    /* frames overlap 92%, so 8 agreeing frames = ~4 s of fresh signal */
+    if (cand_n >= 8) {
         float m = 0;
-        for (int i = cand_n - 5; i < cand_n; i++)
+        for (int i = 0; i < 8; i++)
             m += cand_hz[i];
-        m /= 5.0f;
+        m /= 8.0f;
         int ok = 1;
-        for (int i = cand_n - 5; i < cand_n; i++)
-            if (cand_hz[i] < m * 0.93f || cand_hz[i] > m * 1.07f)
+        for (int i = 0; i < 8; i++)
+            if (cand_hz[i] < m * 0.94f || cand_hz[i] > m * 1.06f)
                 ok = 0;
         if (ok)
             return (int)(m * 100 + 0.5f);
     }
     /* DC gate relative to the peak: broadband junk lifts bin 0 toward
        the HR-band magnitude, a clean pulse leaves it far below */
-    if (snr <= 3.0f || mraw[0] >= mx * 0.05f)
+    if (snr <= 3.5f || mraw[0] >= mx * 0.05f)
         return 0;
     /* frame passed: merge into the running average */
     if (spec_reset) {
@@ -359,14 +384,15 @@ static void hrs_init(void)
     uint8_t id;
     if (!i2c_read_reg(HRS_ADDR, 0x00, &id, 1))
         return;
-    /* disabled, 50 ms conversion period, LED 12.5 mA */
-    i2c_write_reg(HRS_ADDR, 0x01, 0x50);
-    /* 0xF low nibble -> clean steady LED during conversion */
+    /* register values proven on this sensor by the open PineTime
+       stacks: 12.5 ms wait, 16-bit HRS+ALS, 8x gain, LED 12.5 mA with
+       the steady-drive low nibble */
+    i2c_write_reg(HRS_ADDR, 0x01, 0x60);
     i2c_write_reg(HRS_ADDR, 0x0C, 0x2f);
-    i2c_write_reg(HRS_ADDR, 0x16, 0x77);  /* HRS+ALS 15-bit */
-    i2c_write_reg(HRS_ADDR, 0x17, 0x00);  /* gain 1x */
+    i2c_write_reg(HRS_ADDR, 0x16, 0x88);  /* HRS+ALS 16-bit */
+    i2c_write_reg(HRS_ADDR, 0x17, 0x0C);  /* gain 8x */
     hal_delay_ms(100);
-    i2c_write_reg(HRS_ADDR, 0x01, 0x50 | 0x80);  /* enable */
+    i2c_write_reg(HRS_ADDR, 0x01, 0x60 | 0x80);  /* enable */
     i2c_write_reg(HRS_ADDR, 0x0C, 0x2f);
     hrs_ok = 1;
 }
@@ -377,8 +403,16 @@ static void hrs_sample(uint32_t now)
     if (!i2c_read_reg(HRS_ADDR, 0x08, d, 8))
         return;
     int32_t hrs = ((int32_t)d[1] << 8) | ((int32_t)(d[2] & 0x0f) << 4) |
-                  (d[7] & 0x0f);
+                  (d[7] & 0x0f) | ((int32_t)(d[7] & 0x30) << 12);
+    /* ambient channel (C1): subtract it so room light doesn't flood the
+       pulse; a saturated ALS also means "not on a wrist" */
+    int32_t als = ((int32_t)(d[5] & 0x3f) << 11) | ((int32_t)d[0] << 3) |
+                  (d[6] & 0x07);
     hrs_raw = hrs;
+    hrs_als = als;
+    hrs -= als;
+    if (hrs < 0)
+        hrs = 0;
 
     /* DC removal + smoothing */
     dc += (hrs - dc) >> 7;
@@ -476,24 +510,29 @@ void sensors_tick(uint32_t now)
     static uint32_t last_bma, last_hrs, last_retry;
     /* a sensor that failed to answer at boot (bus glitch, slow power-up)
        used to stay dead until reboot; retry every 5 s */
-    if ((!hrs_ok || !bma_ok) && now - last_retry >= 5000) {
+    if ((!hrs_ok || !bma_ok || (!bma_engine && bma_retries < 3)) &&
+        now - last_retry >= 5000) {
         last_retry = now;
         if (!hrs_ok) {
             hrs_retries++;
             hrs_init();
         }
-        if (!bma_ok) {
+        if (!bma_ok || !bma_engine) {
             bma_retries++;
-            bma_init();
+            bma_init();              /* re-stream the engine, max 3 tries */
         }
     }
     if (bma_ok && now - last_bma >= 20) {   /* 50 Hz accel */
         last_bma = now;
         bma_sample(now);
     }
-    if (hrs_ok && now - last_hrs >= 50) {   /* 20 Hz PPG */
-        last_hrs = now;
-        hrs_sample(now);
+    /* use the unlatched clock: hal_millis() is frozen for a whole
+       render frame, which would collapse the 50 ms cadence to the
+       frame rate during long redraws */
+    uint32_t raw = hal_millis_raw();
+    if (hrs_ok && raw - last_hrs >= 50) {   /* 20 Hz PPG */
+        last_hrs = raw;
+        hrs_sample(raw);
     }
 }
 
@@ -523,6 +562,7 @@ int sensors_hrs_snr10(void) { return (int)(last_snr * 10); }
 int sensors_hrs_windows(void) { return (int)beats; }
 int sensors_hrs_ok(void)  { return hrs_ok; }
 int sensors_hrs_raw(void)   { return (int)hrs_raw; }
+int sensors_hrs_als(void)   { return (int)hrs_als; }
 int sensors_hrs_ac(void)    { return (int)win_max; }
 int sensors_hrs_beats(void) { return (int)beats; }
 int sensors_hrs_ibi(void)   { return (int)last_ibi; }

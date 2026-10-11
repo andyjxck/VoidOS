@@ -11,12 +11,13 @@ int i2c_read_reg(uint8_t a,uint8_t r,uint8_t*d,unsigned n){
   if(a==0x44&&r==0x08){ double t=T/1000.0, ph=fmod(t*bpm_true/60.0,1.0);
     double w = quiet?0: (0.5+0.5*sin(6.2831853*ph)+0.15*sin(12.566*ph+1.0));
     double noise=((rand()%1000)/1000.0-0.5)*(quiet?60:25);
-    int v=(int)(20000+quiet*0+ w*400 + noise + 300*sin(t*0.3));
-    memset(d,0,n); d[1]=(v>>8)&0xff; d[2]=((v>>4)&0x0f); d[7]=v&0x0f; return 1;}
+    int als=800+(int)(100*sin(t*0.05)); int v=als+(int)(30000+ w*900 + noise*3 + 2500*sin(t*0.3) + ((rand()%200)==0?1500:0));
+    memset(d,0,n); d[1]=(v>>8)&0xff; d[2]=((v>>4)&0x0f); d[7]=(v&0x0f)|(((v>>16)&3)<<4); d[0]=(als>>3)&0xff; d[6]=als&7; d[5]=(als>>11)&0x3f; return 1;}
   if(n) memset(d,0,n); return 1;}
 int i2c_write_reg(uint8_t a,uint8_t r,uint8_t v){(void)a;(void)r;(void)v;return 1;}
 int i2c_write_regs(uint8_t a,uint8_t r,const uint8_t*s,unsigned n){(void)a;(void)r;(void)s;(void)n;return 1;}
 void hal_delay_ms(uint32_t m){T+=m;}
+uint32_t hal_millis_raw(void){return T;}
 int main(){ int loops[]={50,100,150,200,300};
  for(int li=0;li<5;li++){ T=1000; hrs_ok=1; daq_n=0; last_daq_ms=0; bpm=0;bpm_valid=0;memset(hra,0,sizeof hra);spec_reset=1;
   int first=-1; for(int i=0;i<60000/loops[li];i++){T+=loops[li]; hrs_sample(T); if(bpm_valid&&first<0)first=T-1000;}

@@ -74,7 +74,11 @@ struct ble_npl_event *ble_npl_eventq_get(struct ble_npl_eventq *evq,
                 ev->queued = 0;
                 break;
             }
+            /* producers run from ISRs: let them in between polls or
+               this spins forever with PRIMASK set */
+            ble_npl_hw_exit_critical(ctx);
             wdt_kick();
+            ctx = ble_npl_hw_enter_critical();
             if (tmo != BLE_NPL_TIME_FOREVER &&
                 hal_millis_raw() - start >= tmo) {
                 ev = NULL;

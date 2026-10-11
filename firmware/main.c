@@ -6,6 +6,7 @@
 
 void lvgl_port_init(void);
 void ui_init(void);
+void hal_frame_begin(void);
 void ui_tick(void);
 uint32_t button_held_ms(void);
 int ble_init(void);
@@ -31,9 +32,14 @@ int main(void)
     nimble_stage(99);                       /* 99 = init survived */
 
     for (;;) {
+        hal_frame_begin();    /* one time instant for the whole frame */
         ui_tick();
-        lv_timer_handler();   /* render before ble_poll: if the BLE path
-                                 hangs, the face + crash banner stay up */
+        extern int ui_asleep(void);
+        if (!ui_asleep())
+            lv_timer_handler();   /* render before ble_poll: if the BLE
+                                     path hangs, the face + banner stay */
+        else
+            hal_delay_ms(20);     /* dark: nothing to draw, idle slower */
         wdt_kick();
         ble_poll();
         if (button_held_ms() >= 3000)

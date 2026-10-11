@@ -24,7 +24,7 @@ static int ble_want = 1;        /* desired radio state, valid before init */
 static int ble_synced;
 static int d_disc_reason = -1, d_enc_status = -1, d_sec_rc = -99, d_conns;
 static uint32_t adv_check_ms;
-static uint16_t conn_handle;
+static uint16_t conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t own_addr_type = BLE_OWN_ADDR_PUBLIC;
 /* diagnostics visible on the stats screen while BLE is being brought up */
 static int d_syncs, d_adv_calls, d_adv_rc = -1, d_gap_events;
@@ -63,6 +63,7 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         d_disc_reason = ev->disconnect.reason;
+        conn_handle = BLE_HS_CONN_HANDLE_NONE;
         ancs_on_disconnect();
         ble_advertise();
         break;
@@ -100,7 +101,7 @@ static void ble_advertise(void)
         0x07, 0x09, 'V', 'o', 'i', 'd', 'O', 'S',
         0x11, 0x15,
         0xd0, 0x00, 0x2d, 0x12, 0x1e, 0x4b, 0x0f, 0xa4,
-        0x99, 0x4e, 0xce, 0xb5, 0x51, 0xf6, 0x05, 0x79
+        0x99, 0x4e, 0xce, 0xb5, 0x31, 0xf4, 0x05, 0x79
     };
     ble_gap_adv_set_data(adv, sizeof adv);
 
@@ -247,7 +248,6 @@ void ble_diag(int *syncs, int *adv_calls, int *adv_rc, int *gap_events,
     if (syncs)      *syncs = ble_hs_sync_state;   /* 0 bad 1 bringup 2 good */
     if (adv_calls)  *adv_calls = d_st1 * 10 + d_st2;
     if (adv_rc)     *adv_rc = d_st2rc;
-    if (gap_events) *gap_events = d_resetrc;
     if (gap_events) *gap_events = d_gap_events;
     if (addr_type)  *addr_type = own_addr_type;
 }
