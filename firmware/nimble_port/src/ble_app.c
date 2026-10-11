@@ -20,6 +20,9 @@ extern void nimble_mark(int stage);
 
 static int ble_up;
 static int ble_adv_on;
+static int ble_want = 1;        /* desired radio state, valid before init */
+static int ble_synced;
+static uint32_t adv_check_ms;
 static uint16_t conn_handle;
 static uint8_t own_addr_type = BLE_OWN_ADDR_PUBLIC;
 /* diagnostics visible on the stats screen while BLE is being brought up */
@@ -30,6 +33,7 @@ int d_ll_cmds, d_hs_evt_tx;   /* patched into ble_ll_hci.c */
 int d_st1, d_st2, d_st2rc = -9, d_startgo, d_resetrc = -9; /* ble_hs startup */
 
 static void ble_advertise(void);
+int ble_connected(void);
 
 void ancs_on_connect(uint16_t conn);
 void ancs_on_disconnect(void);
@@ -101,8 +105,9 @@ static void on_sync(void)
 {
     /* public addr if burnt in, else the FICR static random */
     d_syncs++;
+    ble_synced = 1;
     ble_hs_id_infer_auto(0, &own_addr_type);
-    ble_adv_on = 1;
+    ble_adv_on = ble_want;
     ble_advertise();
 }
 
@@ -180,6 +185,17 @@ void ble_poll(void)
     }
     npl_callout_tick();
     ancs_tick();
+    /* advertising watchdog: any failed/interrupted adv start (disconnect
+       races, failed pairing) would otherwise leave the watch invisible */
+    {
+        extern uint32_t hal_millis(void);
+        uint32_t now = hal_millis();
+        if (ble_synced && ble_adv_on && now - adv_check_ms > 2000) {
+            adv_check_ms = now;
+            if (!ble_gap_adv_active() && !ble_connected())
+                ble_advertise();
+        }
+    }
     for (int i = 0; i < 32; i++) {
         extern void nimble_stage(int);
         struct ble_npl_event *ev =
@@ -226,11 +242,27 @@ void ble_diag(int *syncs, int *adv_calls, int *adv_rc, int *gap_events,
 
 void ble_set_enabled(int on)
 {
-    if (!ble_up)
-        return;
-    ble_adv_on = on != 0;
-    if (on)
+    ble_want = on != 0;
+    if (!ble_up || !ble_synced)
+        return;                      /* on_sync applies ble_want */
+    ble_adv_on = ble_want;
+    if (on) {
         ble_advertise();
-    else
+    } else {
         ble_gap_adv_stop();
+        if (ble_connected())
+            ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+}
+
+/* 0 off, 1 waiting for sync, 2 advertising, 3 connected, 4 idle/retrying */
+int ble_status(void)
+{
+    if (!ble_want)
+        return 0;
+    if (!ble_synced)
+        return 1;
+    if (ble_connected())
+        return 3;
+    return ble_gap_adv_active() ? 2 : 4;
 }

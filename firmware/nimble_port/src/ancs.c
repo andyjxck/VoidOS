@@ -33,7 +33,7 @@ static const ble_uuid128_t uuid_ds = BLE_UUID128_INIT(
     0xb5, 0x4b, 0xd6, 0x24, 0xe9, 0xc6, 0xea, 0x22);
 
 /* notification store shown on the NOTIF screen */
-#define ANCS_MAX_NOTIFS 6
+#define ANCS_MAX_NOTIFS 4
 struct ancs_notif {
     uint32_t uid;
     uint8_t flags;          /* ANCS event flags (silent/important/…) */
@@ -41,7 +41,7 @@ struct ancs_notif {
     uint32_t rx_ms;
     char app[20];
     char title[48];
-    char msg[128];
+    char msg[96];
 };
 static struct ancs_notif notifs[ANCS_MAX_NOTIFS];
 static int notif_count;
@@ -56,7 +56,7 @@ static uint16_t h_ns_val, h_ns_cccd, h_ds_val, h_ds_cccd, h_cp_val;
 static uint32_t disc_retry_at;
 
 /* Data Source responses can fragment across notifications; accumulate */
-static uint8_t ds_buf[560];
+static uint8_t ds_buf[320];
 static int ds_len;
 static uint32_t pending_uid;
 
@@ -133,7 +133,7 @@ static void fetch_attrs(uint32_t uid)
     req[n++] = 48; req[n++] = 0x00;
     req[n++] = 0x02;                 /* Subtitle */
     req[n++] = 0x03;                 /* Message */
-    req[n++] = 128; req[n++] = 0x00;
+    req[n++] = 95; req[n++] = 0x00;
     req[n++] = 0x05;                 /* Date */
     req[n++] = 0x06;                 /* PositiveActionLabel */
     req[n++] = 0x07;                 /* NegativeActionLabel */

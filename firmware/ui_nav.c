@@ -42,8 +42,15 @@ static int bt_on = 1;
 
 int ble_connected(void);
 void ble_set_enabled(int on);
+int ble_status(void);
 void ble_diag(int *syncs, int *adv_calls, int *adv_rc, int *gap_events,
               int *addr_type);
+
+/* radio follows BT toggle AND airplane mode, from every entry point */
+static void apply_radio(void)
+{
+    ble_set_enabled(bt_on && !airplane_on);
+}
 
 /* workout */
 static int w_active, w_paused, w_sets;
@@ -493,8 +500,7 @@ static void cc_cb(lv_event_t *e)
     case 0: dnd_on ^= 1; break;
     case 1:
         airplane_on ^= 1;
-        /* airplane kills the radio outright, on top of the BT toggle */
-        ble_set_enabled(bt_on && !airplane_on);
+        apply_radio();
         break;
     case 3:
         torch_on ^= 1;
@@ -502,7 +508,9 @@ static void cc_cb(lv_event_t *e)
         break;
     case 2:
         bt_on ^= 1;
-        ble_set_enabled(bt_on && !airplane_on);
+        if (bt_on)
+            airplane_on = 0;     /* explicitly enabling BT leaves airplane */
+        apply_radio();
         break;
     case 4:
         nav_to(SCR_NOTIF);
@@ -876,7 +884,7 @@ static void build_settings(lv_obj_t *r)
         "DND", "AIRPLANE", "BLUETOOTH", "TORCH", "WATER LOCK",
         "BRIGHTNESS", "CC: TORCH", "CC: WATER", "CC: PHONE", "SET TIME"
     };
-    int vals[10] = {dnd_on, airplane_on, 0, torch_on, water_lock,
+    int vals[10] = {dnd_on, airplane_on, bt_on, torch_on, water_lock,
                     brightness, !(cc_hide & 1), !(cc_hide & 2),
                     !(cc_hide & 4), 1};
     for (int i = 0; i < 10; i++) {
@@ -893,7 +901,11 @@ static void build_settings(lv_obj_t *r)
                                     vals[i] ? C_BG : C_MUTED, 0);
         lv_obj_set_user_data(b, (void *)(intptr_t)i);
     }
-    mk_label_c(r, &kenney9, C_MUTED, 120, 230, "HOLD BUTTON 3S = RESET");
+    static const char *bs[5] = {"BLE OFF", "BLE STARTING", "BLE VISIBLE",
+                                "BLE CONNECTED", "BLE RETRYING"};
+    int st = ble_status();
+    mk_label_c(r, &kenney9, st == 2 || st == 3 ? C_GOOD : C_MUTED, 120,
+               230, bs[st < 0 || st > 4 ? 4 : st]);
 }
 
 /* manual time set, like the reference watches: +/- on hour/minute,
@@ -951,7 +963,13 @@ static void settings_cb(lv_event_t *e)
     int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
     switch (i) {
     case 0: dnd_on ^= 1; break;
-    case 1: airplane_on ^= 1; break;
+    case 1: airplane_on ^= 1; apply_radio(); break;
+    case 2:
+        bt_on ^= 1;
+        if (bt_on)
+            airplane_on = 0;
+        apply_radio();
+        break;
     case 3:
         torch_on ^= 1;
         display_backlight(torch_on ? 3 : 1 + brightness * 2 / 100);
@@ -1309,8 +1327,7 @@ void ui_init(void)
     /* no LV_EVENT_GESTURE or CLICKED handler: the CST816S detects
        gestures in hardware (ui_swipe) and taps never navigate */
     persist_load();
-    if (!bt_on)
-        ble_set_enabled(0);
+    apply_radio();
     display_backlight(3);
     last_input_ms = hal_millis();
     nav_to(SCR_FACE);
