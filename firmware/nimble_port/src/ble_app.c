@@ -22,6 +22,7 @@ static int ble_up;
 static int ble_adv_on;
 static int ble_want = 1;        /* desired radio state, valid before init */
 static int ble_synced;
+static int d_disc_reason = -1, d_enc_status = -1, d_sec_rc = -99, d_conns;
 static uint32_t adv_check_ms;
 static uint16_t conn_handle;
 static uint8_t own_addr_type = BLE_OWN_ADDR_PUBLIC;
@@ -54,12 +55,14 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
             ancs_on_connect(conn_handle);
             /* ask the phone to pair/encrypt: ANCS + CTS need it, and
                iOS only prompts when the accessory requests security */
-            ble_gap_security_initiate(conn_handle);
+            d_conns++;
+            d_sec_rc = ble_gap_security_initiate(conn_handle);
         } else {
             ble_advertise();
         }
         break;
     case BLE_GAP_EVENT_DISCONNECT:
+        d_disc_reason = ev->disconnect.reason;
         ancs_on_disconnect();
         ble_advertise();
         break;
@@ -71,6 +74,7 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
         ancs_on_notify(ev->notify_rx.attr_handle, ev->notify_rx.om);
         break;
     case BLE_GAP_EVENT_ENC_CHANGE:
+        d_enc_status = ev->enc_change.status;
         if (ev->enc_change.status == 0) {
             ancs_on_enc_ok();
         }
@@ -273,4 +277,18 @@ int ble_status(void)
     if (ble_connected())
         return 3;
     return ble_gap_adv_active() ? 2 : 4;
+}
+
+/* link diagnostics for the on-watch DIAG screen */
+void ble_link_diag(int *conns, int *sec_rc, int *enc_status,
+                   int *disc_reason, int *encrypted)
+{
+    struct ble_gap_conn_desc d;
+    if (conns)       *conns = d_conns;
+    if (sec_rc)      *sec_rc = d_sec_rc;
+    if (enc_status)  *enc_status = d_enc_status;
+    if (disc_reason) *disc_reason = d_disc_reason;
+    if (encrypted)
+        *encrypted = ble_up && ble_gap_conn_find(conn_handle, &d) == 0 &&
+                     d.sec_state.encrypted;
 }

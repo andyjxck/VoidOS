@@ -27,7 +27,7 @@ extern const lv_font_t kenney9, kenney16, kenney24, kenney56;
 typedef enum {
     SCR_FACE, SCR_LAUNCHER, SCR_CC, SCR_WORKOUT, SCR_W_RUN, SCR_W_DONE,
     SCR_SLEEP, SCR_S_DONE, SCR_WATER, SCR_CLOCK, SCR_SETTINGS, SCR_STATS,
-    SCR_SETTIME, SCR_NOTIF, SCR_CARDIO
+    SCR_SETTIME, SCR_NOTIF, SCR_CARDIO, SCR_DIAG
 } scr_t;
 
 static scr_t cur = SCR_FACE;
@@ -879,6 +879,7 @@ static void clock_cb(lv_event_t *e)
 /* ---- settings --------------------------------------------------------------- */
 
 static void settings_cb(lv_event_t *e);
+static void diag_open_cb(lv_event_t *e);
 
 static void build_settings(lv_obj_t *r)
 {
@@ -908,8 +909,13 @@ static void build_settings(lv_obj_t *r)
     static const char *bs[5] = {"BLE OFF", "BLE STARTING", "BLE VISIBLE",
                                 "BLE CONNECTED", "BLE RETRYING"};
     int st = ble_status();
-    mk_label_c(r, &kenney9, st == 2 || st == 3 ? C_GOOD : C_MUTED, 120,
-               230, bs[st < 0 || st > 4 ? 4 : st]);
+    char fb[40];
+    lv_snprintf(fb, sizeof fb, "%s  DIAG >", bs[st < 0 || st > 4 ? 4 : st]);
+    lv_obj_t *db = mk_btn(r, fb, 30, 226, 180, 14, C_BG, diag_open_cb);
+    lv_obj_set_style_border_width(db, 0, 0);
+    lv_obj_set_style_text_font(lv_obj_get_child(db, 0), &kenney9, 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(db, 0),
+                                st == 2 || st == 3 ? C_GOOD : C_MUTED, 0);
 }
 
 /* manual time set, like the reference watches: +/- on hour/minute,
@@ -1293,6 +1299,62 @@ static void build_cardio(lv_obj_t *r)
     mk_label_c(r, &kenney9, C_MUTED, 120, 220, "HRS3300 OPTICAL");
 }
 
+
+/* ---- on-watch diagnostics ------------------------------------------------- */
+
+int sensors_hrs_raw(void), sensors_hrs_ac(void), sensors_hrs_fs10(void);
+int sensors_hrs_snr10(void), sensors_hrs_windows(void), sensors_retries(void);
+int sensors_bma_engine(void);
+int hal_clock_synced(void);
+int ancs_cts_state(void);
+void ble_link_diag(int *conns, int *sec_rc, int *enc_status,
+                   int *disc_reason, int *encrypted);
+
+static lv_obj_t *diag_lbl;
+static unsigned diag_loops, diag_lps;
+static uint32_t diag_t0;
+
+static void diag_open_cb(lv_event_t *e)
+{
+    (void)e;
+    nav_to(SCR_DIAG);
+}
+
+static void diag_fill(void)
+{
+    char b[400];
+    int conns, sec, enc, disc, encd;
+    ble_link_diag(&conns, &sec, &enc, &disc, &encd);
+    lv_snprintf(b, sizeof b,
+        "HRS ok%d raw%d ac%d\n"
+        " snr%d.%d win%d fs%d.%d bpm%d\n"
+        "BMA ok%d eng%d stp%d rty%d\n"
+        "BLE st%d conn%d enc%d\n"
+        " sec%d encst%d disc%d\n"
+        " ancs%d cts%d time%d\n"
+        "LOOP %d/s bat%d%%",
+        sensors_hrs_ok(), sensors_hrs_raw(), sensors_hrs_ac(),
+        sensors_hrs_snr10() / 10, sensors_hrs_snr10() % 10,
+        sensors_hrs_windows(), sensors_hrs_fs10() / 10,
+        sensors_hrs_fs10() % 10, sensors_bpm(),
+        sensors_bma_ok(), sensors_bma_engine(), sensors_steps(),
+        sensors_retries(),
+        ble_status(), conns, encd, sec, enc, disc,
+        ancs_state(), ancs_cts_state(), hal_clock_synced(),
+        (int)diag_lps, hal_battery_pct());
+    if (diag_lbl)
+        lv_label_set_text(diag_lbl, b);
+}
+
+static void build_diag(lv_obj_t *r)
+{
+    page_bg(r);
+    mk_header(r, "DIAG", 1);
+    diag_lbl = mk_label(r, &kenney9, C_WHITE, 14, 42, "");
+    lv_obj_set_width(diag_lbl, 216);
+    diag_fill();
+}
+
 /* ---- dispatch ------------------------------------------------------------------ */
 
 static void rebuild(void)
@@ -1301,6 +1363,7 @@ static void rebuild(void)
     lbl_time_big = NULL;
     cardio_trace = NULL;
     cardio_bpm = NULL;
+    diag_lbl = NULL;
     switch (cur) {
     case SCR_FACE:      ui_face_build(root); break;
     case SCR_LAUNCHER:  build_launcher(root); break;
@@ -1317,6 +1380,7 @@ static void rebuild(void)
     case SCR_SETTIME:   build_settime(root); break;
     case SCR_NOTIF:     build_notif(root); break;
     case SCR_CARDIO:    build_cardio(root); break;
+    case SCR_DIAG:      build_diag(root); break;
     }
 }
 
@@ -1342,6 +1406,12 @@ uint32_t button_held_ms(void);
 void ui_tick(void)
 {
     uint32_t now = hal_millis();
+    diag_loops++;
+    if (now - diag_t0 >= 1000) {
+        diag_lps = diag_loops * 1000 / (now - diag_t0);
+        diag_loops = 0;
+        diag_t0 = now;
+    }
     if (!ui_start_ms)
         ui_start_ms = now;   /* first loop iter, after ble_init's boot marks */
     extern int ble_dfu_busy(void);
@@ -1435,6 +1505,14 @@ void ui_tick(void)
     case SCR_FACE:
         ui_face_tick();
         break;
+    case SCR_DIAG: {
+        static uint32_t last_d;
+        if (now - last_d >= 500) {
+            last_d = now;
+            diag_fill();
+        }
+        break;
+    }
     case SCR_CARDIO:
         if (cardio_trace) {
             static uint32_t last_tr;

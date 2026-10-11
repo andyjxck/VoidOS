@@ -416,9 +416,24 @@ void sensors_init(void)
     hrs_init();
 }
 
+static unsigned hrs_retries, bma_retries;
+
 void sensors_tick(uint32_t now)
 {
-    static uint32_t last_bma, last_hrs;
+    static uint32_t last_bma, last_hrs, last_retry;
+    /* a sensor that failed to answer at boot (bus glitch, slow power-up)
+       used to stay dead until reboot; retry every 5 s */
+    if ((!hrs_ok || !bma_ok) && now - last_retry >= 5000) {
+        last_retry = now;
+        if (!hrs_ok) {
+            hrs_retries++;
+            hrs_init();
+        }
+        if (!bma_ok) {
+            bma_retries++;
+            bma_init();
+        }
+    }
     if (bma_ok && now - last_bma >= 20) {   /* 50 Hz accel */
         last_bma = now;
         bma_sample(now);
@@ -448,6 +463,9 @@ int sensors_wrist_raise(void)
 }
 int sensors_bma_engine(void) { return bma_engine; }
 int sensors_hrs_fs10(void) { return (int)(hr_fs * 10.0f); }
+int sensors_retries(void) { return (int)(hrs_retries * 100 + bma_retries); }
+int sensors_hrs_snr10(void) { return (int)(last_snr * 10); }
+int sensors_hrs_windows(void) { return (int)beats; }
 int sensors_hrs_ok(void)  { return hrs_ok; }
 int sensors_hrs_raw(void)   { return (int)hrs_raw; }
 int sensors_hrs_ac(void)    { return (int)win_max; }
