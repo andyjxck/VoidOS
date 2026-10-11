@@ -217,8 +217,7 @@ void ui_face_build(lv_obj_t *scr)
 
     /* complications */
     label(scr, &kenney9, 0x59647B, 90, 50, 60, "VOIDOS");
-    lbl_steps = label(scr, &kenney9, 0x8890A0, 80, 66, 80, "STEPS --");
-    /* footprint icon left of the steps readout (icon_alpha[14]) */
+    /* steps complication: footprint icon + bare number, no "STEPS" */
     static lv_image_dsc_t fp_dsc;
     fp_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     fp_dsc.header.w = 24;
@@ -229,9 +228,11 @@ void ui_face_build(lv_obj_t *scr)
     fp_dsc.data_size = 24 * 24;
     lv_obj_t *fp = lv_image_create(scr);
     lv_image_set_src(fp, &fp_dsc);
-    lv_obj_set_pos(fp, 58, 62);
+    lv_obj_set_pos(fp, 76, 60);
     lv_obj_set_style_image_recolor(fp, lv_color_hex(0x8890A0), 0);
     lv_obj_set_style_image_recolor_opa(fp, LV_OPA_COVER, 0);
+    lbl_steps = label(scr, &kenney9, 0x8890A0, 102, 66, 60, "--");
+    lv_obj_set_style_text_align(lbl_steps, LV_TEXT_ALIGN_LEFT, 0);
     lbl_date = label(scr, &kenney9, 0x8890A0, 160, 112, 56, "");
 
     heart_obj = lv_obj_create(scr);
@@ -261,8 +262,8 @@ void ui_face_tick(void)
     }
     int steps = ui_steps();
     if (steps != last_steps) {
-        lv_snprintf(buf, sizeof buf, "STEPS %d", steps >= 0 ? steps : 0);
-        lv_label_set_text(lbl_steps, buf);
+        lv_snprintf(buf, sizeof buf, "%d", steps >= 0 ? steps : 0);
+        lv_label_set_text(lbl_steps, steps >= 0 ? buf : "--");
         last_steps = steps;
     }
     int synced = hal_clock_synced();

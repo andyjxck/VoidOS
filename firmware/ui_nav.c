@@ -363,18 +363,6 @@ static const uint8_t tile_icon[7][2] = {
     {6, 6},   /* SETTINGS                                     */
 };
 
-static lv_obj_t *mk_icon(lv_obj_t *parent, int tile, int on)
-{
-    if (!icon_dsc_ready)
-        icon_dsc_init();
-    lv_obj_t *img = lv_image_create(parent);
-    lv_image_set_src(img, &icon_dsc[tile_icon[tile][on != 0]]);
-    lv_obj_set_style_image_recolor(img, on ? C_BG : C_ACCENT, 0);
-    lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
-    lv_obj_center(img);
-    return img;
-}
-
 /* positional icon by raw icon_alpha index — for capsules and stats */
 static lv_obj_t *mk_icon_at(lv_obj_t *parent, int idx, int on, int x, int y)
 {
@@ -417,20 +405,20 @@ static lv_color_t cc_tint(int i)
     return lv_color_hex(0x28303C);           /* settings grey */
 }
 
-/* flat-top hexagon painted scanline by scanline, tinted when active —
-   the honeycomb the rest of VoidOS already uses */
-static void hex_draw(lv_event_t *e)
+/* honeycomb layout: cx, cy, tile — staggered like the simulator comb
+   (int16: 149/177 overflow an int8 and wrap the hexes off-screen) */
+static const int16_t cc_hexpos[7][3] = {
+    { 91,  78, 0}, {149,  78, 1},
+    { 63, 128, 2}, {120, 128, 3}, {177, 128, 4},
+    { 91, 178, 5}, {149, 178, 6}
+};
+
+static void hex_fill(lv_layer_t *layer, int cx, int cy, int r, int h,
+                     lv_color_t c)
 {
-    lv_obj_t *o = lv_event_get_current_target(e);
-    lv_layer_t *layer = lv_event_get_layer(e);
-    lv_area_t a;
-    lv_obj_get_coords(o, &a);
-    int cx = (a.x1 + a.x2) / 2, cy = (a.y1 + a.y2) / 2;
-    int r = (a.x2 - a.x1) / 2, h = (a.y2 - a.y1) / 2;
-    int i = (int)(intptr_t)lv_obj_get_user_data(o);
     lv_draw_line_dsc_t dsc;
     lv_draw_line_dsc_init(&dsc);
-    dsc.color = cc_state(i) ? cc_tint(i) : lv_color_hex(0x232B3B);
+    dsc.color = c;
     dsc.opa = LV_OPA_COVER;
     for (int dy = -h; dy <= h; dy++) {
         int hw = r - r * (dy < 0 ? -dy : dy) / (2 * h);
@@ -441,25 +429,37 @@ static void hex_draw(lv_event_t *e)
     }
 }
 
-/* vertical capsule: the battery/brightness pills flanking the comb */
-static void vcap_draw(lv_event_t *e)
+static void vcap_fill(lv_layer_t *layer, int x, int y, int w, int h,
+                      int pct, lv_color_t c)
 {
-    lv_obj_t *o = lv_event_get_current_target(e);
-    lv_layer_t *layer = lv_event_get_layer(e);
-    lv_area_t a;
-    lv_obj_get_coords(o, &a);
-    int pct = (int)(intptr_t)lv_obj_get_user_data(o);
     lv_draw_rect_dsc_t dsc;
     lv_draw_rect_dsc_init(&dsc);
-    dsc.radius = (a.x2 - a.x1) / 2;
+    dsc.radius = w / 2;
     dsc.bg_opa = LV_OPA_COVER;
+    lv_area_t a = {x, y, x + w - 1, y + h - 1};
     dsc.bg_color = lv_color_hex(0x28303C);
     lv_draw_rect(layer, &dsc, &a);
-    int fh = (a.y2 - a.y1) * pct / 100;
-    lv_area_t fill = a;
-    fill.y1 = a.y2 - fh;
-    dsc.bg_color = pct > 50 ? C_GOOD : C_WARN;
-    lv_draw_rect(layer, &dsc, &fill);
+    a.y1 = a.y2 - h * pct / 100;
+    dsc.bg_color = c;
+    lv_draw_rect(layer, &dsc, &a);
+}
+
+/* one draw pass paints the whole control centre — capsules, comb —
+   the same proven pattern as the face's dial_draw */
+static void cc_draw(lv_event_t *e)
+{
+    lv_layer_t *layer = lv_event_get_layer(e);
+    vcap_fill(layer, 36, 50, 18, 76, hal_battery_pct(),
+              hal_battery_pct() > 30 ? C_GOOD : C_WARN);
+    vcap_fill(layer, 186, 50, 18, 76, brightness, C_ACCENT);
+    for (int i = 0; i < 7; i++) {
+        int t = cc_hexpos[i][2];
+        if ((t == 3 && (cc_hide & 1)) || (t == 4 && (cc_hide & 4)) ||
+            (t == 5 && (cc_hide & 2)))
+            continue;
+        hex_fill(layer, cc_hexpos[i][0], cc_hexpos[i][1], 30, 26,
+                 cc_state(t) ? cc_tint(t) : lv_color_hex(0x232B3B));
+    }
 }
 
 static void cc_cb(lv_event_t *e)
@@ -497,65 +497,54 @@ static void cc_cb(lv_event_t *e)
 static void build_cc(lv_obj_t *r)
 {
     page_bg(r);
-    /* the simulator layout: two capsules flanking a hexagon comb —
-       no title, no cards, everything flush to the bezel */
     mk_label_c(r, &kenney16, C_MUTED, 120, 16, "CONTROL");
+
+    /* one canvas paints capsules + the whole comb, like the face's
+       dial layer — per-hex draw objects proved fragile */
+    lv_obj_t *bg = lv_obj_create(r);
+    lv_obj_set_pos(bg, 0, 0);
+    lv_obj_set_size(bg, 240, 240);
+    lv_obj_set_style_bg_opa(bg, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bg, 0, 0);
+    lv_obj_set_style_pad_all(bg, 0, 0);
+    lv_obj_remove_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(bg, cc_draw, LV_EVENT_DRAW_MAIN, NULL);
 
     char bb[8];
     lv_snprintf(bb, sizeof bb, "%d%%", hal_battery_pct());
-
-    /* left capsule: battery level, icon on top, % beside */
-    lv_obj_t *cap = lv_obj_create(r);
-    lv_obj_set_pos(cap, 36, 50);
-    lv_obj_set_size(cap, 18, 76);
-    lv_obj_set_style_bg_opa(cap, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(cap, 0, 0);
-    lv_obj_set_style_pad_all(cap, 0, 0);
-    lv_obj_set_user_data(cap, (void *)(intptr_t)hal_battery_pct());
-    lv_obj_add_event_cb(cap, vcap_draw, LV_EVENT_DRAW_MAIN, NULL);
-    lv_obj_remove_flag(cap, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    mk_icon_at(r, 8, 1, 33, 32);         /* battery icon above */
+    mk_icon_at(r, 8, 1, 33, 24);         /* battery icon above capsule */
     mk_label_c(r, &kenney9, C_MUTED, 45, 132, bb);
-
-    /* right capsule: brightness — tap steps 25/50/75/100 */
-    lv_obj_t *bcap = lv_obj_create(r);
-    lv_obj_set_pos(bcap, 186, 50);
-    lv_obj_set_size(bcap, 18, 76);
-    lv_obj_set_style_bg_opa(bcap, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(bcap, 0, 0);
-    lv_obj_set_style_pad_all(bcap, 0, 0);
-    lv_obj_set_user_data(bcap, (void *)(intptr_t)brightness);
-    lv_obj_add_event_cb(bcap, vcap_draw, LV_EVENT_DRAW_MAIN, NULL);
-    lv_obj_add_event_cb(bcap, cc_cb, LV_EVENT_CLICKED, (void *)1);
-    lv_obj_remove_flag(bcap, LV_OBJ_FLAG_SCROLLABLE);
-    mk_icon_at(r, 7, 1, 183, 32);        /* light icon above */
+    mk_icon_at(r, 7, 1, 183, 24);        /* light icon above capsule */
     lv_snprintf(bb, sizeof bb, "%d", brightness);
     mk_label_c(r, &kenney9, C_MUTED, 195, 132, bb);
 
-    /* honeycomb: staggered rows like the simulator comb */
-    static const int8_t hexpos[7][2] = {
-        { 91,  78}, {149,  78},          /* DND, AIR  */
-        { 63, 128}, {120, 128}, {177, 128}, /* BT, TORCH, PHONE */
-        { 91, 178}, {149, 178}           /* LOCK, SETTINGS */
-    };
-    static const uint8_t tile[7] = {0, 1, 2, 3, 4, 5, 6};
+    /* invisible tap targets over the capsule and each hexagon;
+       icons sit on the bg layer so hits never paint over art */
+    lv_obj_t *btap = lv_obj_create(r);
+    lv_obj_set_pos(btap, 180, 44);
+    lv_obj_set_size(btap, 30, 88);
+    lv_obj_set_style_bg_opa(btap, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btap, 0, 0);
+    lv_obj_set_style_pad_all(btap, 0, 0);
+    lv_obj_remove_flag(btap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(btap, cc_cb, LV_EVENT_CLICKED, (void *)1);
+
     for (int i = 0; i < 7; i++) {
-        int t = tile[i];
+        int t = cc_hexpos[i][2];
         if ((t == 3 && (cc_hide & 1)) || (t == 4 && (cc_hide & 4)) ||
             (t == 5 && (cc_hide & 2)))
             continue;
+        mk_icon_at(r, tile_icon[t][cc_state(t) != 0], 0,
+                   cc_hexpos[i][0] - 12, cc_hexpos[i][1] - 12);
         lv_obj_t *hx = lv_obj_create(r);
-        lv_obj_set_pos(hx, hexpos[i][0] - 30, hexpos[i][1] - 26);
-        lv_obj_set_size(hx, 60, 52);
+        lv_obj_set_pos(hx, cc_hexpos[i][0] - 28, cc_hexpos[i][1] - 24);
+        lv_obj_set_size(hx, 56, 48);
         lv_obj_set_style_bg_opa(hx, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(hx, 0, 0);
         lv_obj_set_style_pad_all(hx, 0, 0);
         lv_obj_remove_flag(hx, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_user_data(hx, (void *)(intptr_t)t);
-        lv_obj_add_event_cb(hx, hex_draw, LV_EVENT_DRAW_MAIN, NULL);
         lv_obj_add_event_cb(hx, cc_cb, LV_EVENT_CLICKED, NULL);
-        lv_obj_t *ic = mk_icon(hx, t, cc_state(t));
-        lv_obj_center(ic);
     }
 }
 
