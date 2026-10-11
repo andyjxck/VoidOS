@@ -54,6 +54,8 @@ static uint16_t a_conn;
 static uint16_t svc_start, svc_end;
 static uint16_t h_ns_val, h_ns_cccd, h_ds_val, h_ds_cccd, h_cp_val;
 static uint32_t disc_retry_at;
+static int cts_state;               /* 0 idle 1 disc 2 read 3 synced */
+static uint32_t cts_pending_at;
 
 /* Data Source responses can fragment across notifications; accumulate */
 static uint8_t ds_buf[320];
@@ -335,19 +337,30 @@ static int svc_cb(uint16_t conn, const struct ble_gatt_error *error,
     return 0;
 }
 
-void ancs_on_connect(uint16_t conn)
+static void ancs_begin(void)
 {
-    a_conn = conn;
     svc_start = 0;
     h_ns_val = h_ns_cccd = h_ds_val = h_ds_cccd = h_cp_val = 0;
     state = ST_SVC;
-    ble_gattc_disc_svc_by_uuid(conn, &uuid_ancs.u, svc_cb, NULL);
+    ble_gattc_disc_svc_by_uuid(a_conn, &uuid_ancs.u, svc_cb, NULL);
     disc_retry_at = hal_millis() + 12000;
+}
+
+/* discovery only starts once the link is encrypted (ancs_on_enc_ok):
+   iOS refuses ANCS and CTS access on an unencrypted link */
+void ancs_on_connect(uint16_t conn)
+{
+    a_conn = conn;
+    state = ST_IDLE;
+    cts_state = 0;
+    cts_pending_at = 0;
 }
 
 void ancs_on_disconnect(void)
 {
     state = ST_IDLE;
+    cts_state = 0;
+    cts_pending_at = 0;
     notif_count = 0;
     ds_len = 0;
     notif_dirty = 1;
@@ -356,15 +369,109 @@ void ancs_on_disconnect(void)
 /* the CCCD write gets bounced until iOS finishes pairing — retry */
 void ancs_on_enc_ok(void)
 {
-    if (state == ST_SUB_NS || (state == ST_LIVE && h_ns_cccd)) {
+    if (state == ST_IDLE)
+        ancs_begin();
+    else if (state == ST_SUB_NS || (state == ST_LIVE && h_ns_cccd)) {
         uint8_t on[2] = {1, 0};
         ble_gattc_write_flat(a_conn, h_ns_cccd, on, 2, sub_done, NULL);
     }
+    if (cts_state != 3)
+        cts_pending_at = hal_millis() + 1500;
+}
+
+
+/* ---- Current Time Service client ----------------------------------------
+   iOS exposes the phone's clock as a CTS *server*; it never writes to
+   the watch. So the watch reads 0x2A2B once the link is encrypted. */
+static const ble_uuid16_t uuid_cts = BLE_UUID16_INIT(0x1805);
+static const ble_uuid16_t uuid_ct = BLE_UUID16_INIT(0x2A2B);
+static uint16_t cts_start_h, cts_end_h, cts_val_h;
+int ancs_cts_state(void) { return cts_state; }
+void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s);
+
+static int cts_read_cb(uint16_t conn, const struct ble_gatt_error *error,
+                       struct ble_gatt_attr *attr, void *arg)
+{
+    (void)conn; (void)arg;
+    if (error->status != 0 || !attr || !attr->om) {
+        cts_state = 0;               /* retried after the next ENC change */
+        return 0;
+    }
+    uint8_t t[10];
+    if (OS_MBUF_PKTLEN(attr->om) < 7 ||
+        os_mbuf_copydata(attr->om, 0, 7, t) != 0) {
+        cts_state = 0;
+        return 0;
+    }
+    int year = t[0] | (t[1] << 8);
+    if (year >= 2020 && t[2] >= 1 && t[2] <= 12 && t[3] >= 1) {
+        hal_clock_set(year, t[2], t[3], OS_MBUF_PKTLEN(attr->om) > 7 ? t[7] : 1,
+                      t[4], t[5], t[6]);
+        cts_state = 3;
+    } else {
+        cts_state = 0;
+    }
+    return 0;
+}
+
+static int cts_chr_cb(uint16_t conn, const struct ble_gatt_error *error,
+                      const struct ble_gatt_chr *chr, void *arg)
+{
+    (void)conn; (void)arg;
+    if (error->status == BLE_HS_EDONE) {
+        if (cts_val_h) {
+            cts_state = 2;
+            ble_gattc_read(a_conn, cts_val_h, cts_read_cb, NULL);
+        } else {
+            cts_state = 0;
+        }
+        return 0;
+    }
+    if (error->status == 0 && chr &&
+        !ble_uuid_cmp(&chr->uuid.u, &uuid_ct.u))
+        cts_val_h = chr->val_handle;
+    return 0;
+}
+
+static int cts_svc_cb(uint16_t conn, const struct ble_gatt_error *error,
+                      const struct ble_gatt_svc *svc, void *arg)
+{
+    (void)conn; (void)arg;
+    if (error->status == BLE_HS_EDONE) {
+        if (cts_start_h) {
+            ble_gattc_disc_all_chrs(a_conn, cts_start_h, cts_end_h,
+                                    cts_chr_cb, NULL);
+        } else {
+            cts_state = 0;
+        }
+        return 0;
+    }
+    if (error->status == 0 && svc) {
+        cts_start_h = svc->start_handle;
+        cts_end_h = svc->end_handle;
+    }
+    return 0;
+}
+
+static void cts_begin(void)
+{
+    cts_start_h = cts_end_h = cts_val_h = 0;
+    cts_state = 1;
+    if (ble_gattc_disc_svc_by_uuid(a_conn, &uuid_cts.u, cts_svc_cb, NULL))
+        cts_state = 0;
 }
 
 /* watchdog: if discovery stalls mid-connection, restart it once */
 void ancs_tick(void)
 {
+    /* CTS goes after the ANCS handshake settles — one GATT client
+       procedure at a time on the single link */
+    if (cts_pending_at && hal_millis() >= cts_pending_at &&
+        (state == ST_LIVE || state == ST_IDLE)) {
+        cts_pending_at = 0;
+        if (cts_state == 0)
+            cts_begin();
+    }
     if (state > ST_IDLE && state < ST_LIVE && disc_retry_at &&
         hal_millis() > disc_retry_at) {
         disc_retry_at = hal_millis() + 12000;

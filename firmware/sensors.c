@@ -64,8 +64,13 @@ static void bma_init(void)
         if (i2c_read_reg(BMA_ADDR, 0x5E, feat, 70)) {
             feat[0x3B] |= 0x10;
             feat[0x40] |= 0x01;
-            if (i2c_write_regs(BMA_ADDR, 0x5E, feat, 70))
+            if (i2c_write_regs(BMA_ADDR, 0x5E, feat, 70)) {
                 bma_engine = 1;
+                /* latch feature flags until read, and route wrist-wear
+                   so a poll can never miss a short pulse */
+                i2c_write_reg(BMA_ADDR, 0x55, 0x01);
+                i2c_write_reg(BMA_ADDR, 0x56, 0x08);
+            }
         }
     }
 
@@ -153,7 +158,9 @@ static int16_t ppg_lo = 32767, ppg_hi = -32768;
 #define HR_N   64
 #define HR_SPEC (HR_N / 2)
 static uint16_t daq[HR_N];
-static int daq_n, daq_decim;
+static int daq_n;
+static uint32_t daq_t[HR_N], last_daq_ms;
+static float hr_fs = 10.0f;     /* measured sample rate of the window */
 static float vre[HR_N], vim[HR_N];
 static float spec[HR_SPEC];
 static int spec_n, spec_reset = 1;
@@ -288,7 +295,7 @@ static int hr_analyse(void)
     }
     if (blobs != 1 || wsum <= 0 || (last - first) > 2)
         return 0;
-    float hz = (cent / wsum) * 10.0f / HR_N;
+    float hz = (cent / wsum) * hr_fs / HR_N;
     if (hz < 40.0f / 60.0f || hz > 230.0f / 60.0f)
         return 0;
     return (int)(hz * 100 + 0.5f);
@@ -348,18 +355,31 @@ static void hrs_sample(uint32_t now)
     if (v < ppg_lo) ppg_lo = v;
     if (v > ppg_hi) ppg_hi = v;
 
-    /* spectral DAQ at 10 Hz: sample cadence is 50 ms -> every 2nd */
-    if (++daq_decim < 2)
-        return;
-    daq_decim = 0;
+    /* spectral DAQ: one sample per >=100 ms of wall time. The main loop
+       can run far slower than 20 Hz while the display renders, so the
+       window carries real timestamps and the true rate is measured */
+    if (daq_n > 0 || last_daq_ms) {
+        if (now - last_daq_ms < 100)
+            return;
+    }
+    last_daq_ms = now;
+    daq_t[daq_n] = now;
     daq[daq_n] = (uint16_t)hrs;
     if (daq_n < HR_N - 1) {
         daq_n++;
         return;
     }
+    uint32_t span = daq_t[HR_N - 1] - daq_t[0];
+    hr_fs = span ? (HR_N - 1) * 1000.0f / span : 10.0f;
+    if (hr_fs < 5.0f || hr_fs > 12.0f) {   /* gap in sampling: restart */
+        daq_n = 0;
+        return;
+    }
     int hz100 = hr_analyse();
-    for (int i = 0; i < HR_N - 5; i++)   /* 0.5 s slide between runs */
+    for (int i = 0; i < HR_N - 5; i++) { /* 0.5 s slide between runs */
         daq[i] = daq[i + 5];
+        daq_t[i] = daq_t[i + 5];
+    }
     daq_n = HR_N - 5;
     beats++;
     last_ibi = (uint32_t)(last_snr * 10);
@@ -419,12 +439,15 @@ int sensors_wrist_raise(void)
 {
     if (!bma_engine)
         return 0;
+    /* feature interrupts (step/activity/wrist-wear) live in INT_STATUS_0
+       (0x1C); INT_STATUS_1 (0x1D) carries data-ready/FIFO flags */
     uint8_t v = 0;
-    if (!i2c_read_reg(BMA_ADDR, 0x1D, &v, 1))
+    if (!i2c_read_reg(BMA_ADDR, 0x1C, &v, 1))
         return 0;
     return (v & 0x08) ? 1 : 0;
 }
 int sensors_bma_engine(void) { return bma_engine; }
+int sensors_hrs_fs10(void) { return (int)(hr_fs * 10.0f); }
 int sensors_hrs_ok(void)  { return hrs_ok; }
 int sensors_hrs_raw(void)   { return (int)hrs_raw; }
 int sensors_hrs_ac(void)    { return (int)win_max; }

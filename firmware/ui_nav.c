@@ -320,6 +320,10 @@ static uint32_t last_input_ms;
 
 int ui_asleep(void) { return asleep; }
 
+/* any touch or gesture counts as use — without this the screen slept
+   60 s after wake even mid-interaction */
+void ui_activity(void) { last_input_ms = hal_millis(); }
+
 static int bl_level(void) { return torch_on ? 3 : 1 + brightness * 2 / 100; }
 
 void ui_wake(void)

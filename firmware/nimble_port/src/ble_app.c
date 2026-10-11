@@ -52,6 +52,9 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
             conn_handle = ev->connect.conn_handle;
             /* ANCS discovery kicks off as soon as the link settles */
             ancs_on_connect(conn_handle);
+            /* ask the phone to pair/encrypt: ANCS + CTS need it, and
+               iOS only prompts when the accessory requests security */
+            ble_gap_security_initiate(conn_handle);
         } else {
             ble_advertise();
         }
@@ -68,8 +71,9 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
         ancs_on_notify(ev->notify_rx.attr_handle, ev->notify_rx.om);
         break;
     case BLE_GAP_EVENT_ENC_CHANGE:
-        if (ev->enc_change.status == 0)
+        if (ev->enc_change.status == 0) {
             ancs_on_enc_ok();
+        }
         break;
     case BLE_GAP_EVENT_MTU:
         d_mtu_events++;
@@ -84,13 +88,17 @@ static void ble_advertise(void)
 {
     if (!ble_adv_on)
         return;
-    struct ble_hs_adv_fields f;
-    memset(&f, 0, sizeof f);
-    f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    f.name = (uint8_t *)"VoidOS";
-    f.name_len = 6;
-    f.name_is_complete = 1;
-    ble_gap_adv_set_fields(&f);
+    /* raw adv data: flags, name, and the ANCS service-solicitation UUID
+       (AD type 0x15) — the Apple convention that makes iOS list and
+       pair the accessory and grant it notification access */
+    static const uint8_t adv[] = {
+        0x02, 0x01, 0x06,
+        0x07, 0x09, 'V', 'o', 'i', 'd', 'O', 'S',
+        0x11, 0x15,
+        0xd0, 0x00, 0x2d, 0x12, 0x1e, 0x4b, 0x0f, 0xa4,
+        0x99, 0x4e, 0xce, 0xb5, 0x51, 0xf6, 0x05, 0x79
+    };
+    ble_gap_adv_set_data(adv, sizeof adv);
 
     struct ble_gap_adv_params p;
     memset(&p, 0, sizeof p);

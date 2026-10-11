@@ -113,7 +113,10 @@ void hal_delay_ms(unsigned ms)
 
 /* wall clock: seeded at boot, overwritten when the phone writes the
    BLE Current Time characteristic (hal_clock_set). */
-static uint32_t clock_seed_ms = (10u * 3600u + 9u * 60u) * 1000u;
+#define BUILD_TOD_MS ((((__TIME__[0] - '0') * 10u + (__TIME__[1] - '0')) * 3600u + \
+                      ((__TIME__[3] - '0') * 10u + (__TIME__[4] - '0')) * 60u) * 1000u)
+static uint32_t clock_seed_ms = BUILD_TOD_MS;   /* unsynced fallback: build time */
+static uint32_t clock_set_at, clock_set_tod;
 static int clock_valid;
 static uint16_t clock_year;
 static uint8_t clock_mon, clock_day, clock_dow;
@@ -135,6 +138,8 @@ void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s)
                     (uint32_t)s) * 1000u;
     clock_seed_ms = (tod + 86400000u - hal_millis() % 86400000u) %
                     86400000u;
+    clock_set_at = hal_millis();
+    clock_set_tod = tod;
     clock_year = (uint16_t)y;
     clock_mon = (uint8_t)mo;
     clock_day = (uint8_t)d;
@@ -144,10 +149,30 @@ void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s)
 
 void hal_clock_date(int *y, int *mo, int *d, int *dow)
 {
-    if (y) *y = clock_year;
-    if (mo) *mo = clock_mon;
-    if (d) *d = clock_day;
-    if (dow) *dow = clock_dow;
+    /* roll the synced date forward by however many midnights have
+       passed since it was set, with month/year/leap handling */
+    int yy = clock_year, mm = clock_mon, dd = clock_day, ww = clock_dow;
+    if (clock_valid && yy) {
+        uint32_t days = (clock_set_tod + (hal_millis() - clock_set_at)) /
+                        86400000u;
+        while (days--) {
+            static const uint8_t dim[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+            int leap = (yy % 4 == 0 && yy % 100 != 0) || yy % 400 == 0;
+            int lim = dim[(mm - 1) % 12] + (mm == 2 && leap);
+            if (++dd > lim) {
+                dd = 1;
+                if (++mm > 12) {
+                    mm = 1;
+                    yy++;
+                }
+            }
+            ww = ww % 7 + 1;           /* 1=Mon .. 7=Sun */
+        }
+    }
+    if (y) *y = yy;
+    if (mo) *mo = mm;
+    if (d) *d = dd;
+    if (dow) *dow = ww;
 }
 
 /* vibration motor, GPIO P0.16 */

@@ -11,12 +11,16 @@ int touch_gesture_x(void);
 uint32_t hal_millis_raw(void);
 int ui_asleep(void);
 void ui_wake(void);
+void ui_activity(void);
 void ui_swipe(int cst_dir, int start_x);
 
 /* partial-render buffer: LVGL renders into this, we push it to the LCD */
 static uint16_t draw_buf[240 * 32];
 
 unsigned lvgl_flushes;
+uint32_t hal_millis(void);
+void sensors_tick(uint32_t now);
+void ble_poll(void);
 
 static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px)
 {
@@ -24,6 +28,11 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px)
                  (const uint16_t *)px);
     lvgl_flushes++;
     lv_display_flush_ready(disp);
+    /* a full-screen software render takes hundreds of ms; keep the
+       sensors and the BLE stack serviced between strips instead of
+       starving them until the frame finishes */
+    sensors_tick(hal_millis());
+    ble_poll();
 }
 
 /* The CST816S detects swipes in hardware: a gesture ID navigates
@@ -50,6 +59,7 @@ static void read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
     int g = touch_gesture();
     if (g >= 1 && g <= 4) {
+        ui_activity();
         ui_swipe(g, touch_gesture_x());
         eat_touch = 1;
     }
@@ -62,6 +72,7 @@ static void read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     }
 
     if (touch_sample(&x, &y)) {
+        ui_activity();
         last.x = x;
         last.y = y;
         data->state = LV_INDEV_STATE_PRESSED;
