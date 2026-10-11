@@ -2,6 +2,7 @@
 #include "lvgl.h"
 #include "voidos/hal.h"
 #include "board.h"
+#include "assets.h"
 
 extern const lv_font_t kenney9, kenney16, kenney24, kenney56;
 int sensors_bpm(void);
@@ -122,8 +123,12 @@ static void dial_draw(lv_event_t *ev)
     int h = hal_clock_hour() % 12;
     int m = hal_clock_minute();
 
-    /* second behind, then minute, then hour on top */
-    hand(layer, sweep, 88, 18, 2, 0x5AC8D2);
+    /* second hand is a plain thin line — a triangle stretched it into
+       a malformed blob; minute and hour keep the tapered profile */
+    float sa = (sweep - 90.0f) * 0.0174533f;
+    draw_line(layer, CX - (int)(cosf(sa) * 18), CY - (int)(sinf(sa) * 18),
+              CX + (int)(cosf(sa) * 88), CY + (int)(sinf(sa) * 88),
+              lv_color_hex(0x5AC8D2), 2, 1);
     hand(layer, (m + s / 60.0f) * 6.0f, 76, 12, 5, 0xD8E0EC);
     hand(layer, (h + m / 60.0f) * 30.0f, 52, 12, 7, 0xFFFFFF);
 
@@ -213,6 +218,20 @@ void ui_face_build(lv_obj_t *scr)
     /* complications */
     label(scr, &kenney9, 0x59647B, 90, 50, 60, "VOIDOS");
     lbl_steps = label(scr, &kenney9, 0x8890A0, 80, 66, 80, "STEPS --");
+    /* footprint icon left of the steps readout (icon_alpha[14]) */
+    static lv_image_dsc_t fp_dsc;
+    fp_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    fp_dsc.header.w = 24;
+    fp_dsc.header.h = 24;
+    fp_dsc.header.cf = LV_COLOR_FORMAT_A8;
+    fp_dsc.header.stride = 24;
+    fp_dsc.data = icon_alpha[14];
+    fp_dsc.data_size = 24 * 24;
+    lv_obj_t *fp = lv_image_create(scr);
+    lv_image_set_src(fp, &fp_dsc);
+    lv_obj_set_pos(fp, 58, 62);
+    lv_obj_set_style_image_recolor(fp, lv_color_hex(0x8890A0), 0);
+    lv_obj_set_style_image_recolor_opa(fp, LV_OPA_COVER, 0);
     lbl_date = label(scr, &kenney9, 0x8890A0, 160, 112, 56, "");
 
     heart_obj = lv_obj_create(scr);

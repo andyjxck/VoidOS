@@ -27,7 +27,7 @@ extern const lv_font_t kenney9, kenney16, kenney24, kenney56;
 typedef enum {
     SCR_FACE, SCR_LAUNCHER, SCR_CC, SCR_WORKOUT, SCR_W_RUN, SCR_W_DONE,
     SCR_SLEEP, SCR_S_DONE, SCR_WATER, SCR_CLOCK, SCR_SETTINGS, SCR_STATS,
-    SCR_SETTIME
+    SCR_SETTIME, SCR_NOTIF, SCR_CARDIO
 } scr_t;
 
 static scr_t cur = SCR_FACE;
@@ -64,7 +64,6 @@ static uint32_t sw_t0, sw_acc;
 static uint32_t timer_end_ms;
 static int timer_done;
 static uint32_t motor_off_at;
-static lv_obj_t *stats_trace;
 static int alarm_on = 1;
 
 /* navigation */
@@ -179,7 +178,9 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt,
     lv_obj_set_pos(b, x, y);
     lv_obj_set_size(b, w, h);
     lv_obj_set_style_bg_color(b, fill, 0);
-    lv_obj_set_style_radius(b, h / 2, 0);
+    lv_obj_set_style_radius(b, 4, 0);   /* sharp: the 240 panel has a bezel,
+                                         not the bevel-less glass the
+                                         squircle look was designed for */
     lv_obj_set_style_border_width(b, 1, 0);
     lv_obj_set_style_border_color(b, C_EDGE, 0);
     lv_obj_set_style_shadow_width(b, 0, 0);
@@ -254,37 +255,52 @@ static void back_cb(lv_event_t *e)
     nav_to(back_target);
 }
 
-/* CST816S gesture register IDs (as InfiniTime's Cst816s.h): 1=down
-   2=up 3=left 4=right — the control centre sits above the face (pull
-   down to reveal it), apps sit below (pull up), right goes back */
-static void dir_nav(int cst_dir)
+/* CST816S gesture register IDs: 1=down 2=up 3=left(R->L) 4=right(L->R).
+   Five-way face map, edge-aware on the down swipe:
+     down on the left half  -> control centre
+     down on the right half -> apps
+     up                     -> stats
+     L->R                   -> notifications
+     R->L                   -> cardio
+   Each panel exits with the opposite swipe; inner screens keep
+   L->R (dir 4) as back like before. */
+static void dir_nav(int cst_dir, int start_x)
 {
     if (water_lock)
         return;
     if (cur == SCR_FACE) {
         if (cst_dir == 1)
-            nav_to(SCR_CC);
+            nav_to(start_x < 120 ? SCR_CC : SCR_LAUNCHER);
         else if (cst_dir == 2)
-            nav_to(SCR_LAUNCHER);
-        else if (cst_dir == 3)
             nav_to(SCR_STATS);
-    } else if (cur == SCR_CC) {
+        else if (cst_dir == 4)
+            nav_to(SCR_NOTIF);
+        else if (cst_dir == 3)
+            nav_to(SCR_CARDIO);
+    } else if (cur == SCR_CC || cur == SCR_LAUNCHER) {
         if (cst_dir == 2)
+            nav_to(SCR_FACE);
+    } else if (cur == SCR_STATS) {
+        if (cst_dir == 1)
+            nav_to(SCR_FACE);
+    } else if (cur == SCR_NOTIF) {
+        if (cst_dir == 3)
+            nav_to(SCR_FACE);
+    } else if (cur == SCR_CARDIO) {
+        if (cst_dir == 4)
             nav_to(SCR_FACE);
     } else {
         if (cst_dir == 4)
             nav_to(back_target);
-        else if (cst_dir == 3 && cur == SCR_LAUNCHER)
-            nav_to(SCR_STATS);
     }
 }
 
 static uint32_t last_swipe_ms;
 
-void ui_swipe(int cst_dir)
+void ui_swipe(int cst_dir, int start_x)
 {
     last_swipe_ms = hal_millis();
-    dir_nav(cst_dir);
+    dir_nav(cst_dir, start_x);
 }
 
 static uint32_t ui_start_ms;
@@ -307,35 +323,24 @@ void ui_wake(void)
     last_input_ms = hal_millis();
 }
 
-static void tap_cb(lv_event_t *e)
-{
-    (void)e;
-    /* swallow a phantom tap latched by the touch chip across power-on;
-       the window is short and only blocks the face->launcher tap */
-    if (hal_millis() - ui_start_ms < 2500)
-        return;
-    /* a click that lands right after a swipe is the swipe's tail, not a
-       real tap — otherwise face->CC would bounce straight to launcher */
-    if (hal_millis() - last_swipe_ms < 400)
-        return;
-    if (cur == SCR_FACE && !water_lock)
-        nav_to(SCR_LAUNCHER);
-}
+/* taps never navigate — the five-way swipe map is the only way off the
+   face, so there is no tap_cb. Root stays clickable only so the CST816S
+   events still flow through the indev to child buttons. */
 
 /* ---- baked material icons (assets/fonts PNGs -> icon_alpha[][]) ----------- */
 
 #include "assets.h"
 
-static lv_image_dsc_t icon_dsc[14];
+static lv_image_dsc_t icon_dsc[15];
 static int icon_dsc_ready;
 
 /* icon_alpha order (tools/gen_assets.py ICONS):
    0 dnd_on 1 flight 2 bt 3 torch_on 4 phone_vibrate 5 water_drop
    6 settings 7 light_mode 8 battery 9 dnd_off 10 airplane_off
-   11 bt_off 12 torch_off 13 cloud */
+   11 bt_off 12 torch_off 13 cloud 14 footprint */
 static void icon_dsc_init(void)
 {
-    for (int i = 0; i < 14; i++) {
+    for (int i = 0; i < 15; i++) {
         icon_dsc[i].header.magic = LV_IMAGE_HEADER_MAGIC;
         icon_dsc[i].header.w = 24;
         icon_dsc[i].header.h = 24;
@@ -348,13 +353,14 @@ static void icon_dsc_init(void)
 }
 
 /* per-tile icon index for on/off states */
-static const uint8_t tile_icon[6][2] = {
+static const uint8_t tile_icon[7][2] = {
     {9, 0},   /* DND:      off -> dnd_off,      on -> dnd_on   */
     {10, 1},  /* AIR:      off -> airplane_off, on -> flight   */
     {11, 2},  /* BT:       off -> bt_off,       on -> bt       */
     {12, 3},  /* TORCH:    off -> torch_off,    on -> torch_on */
     {4, 4},   /* PHONE:    mobile_vibrate both ways             */
     {5, 5},   /* LOCK:     water_drop both ways                 */
+    {6, 6},   /* SETTINGS                                     */
 };
 
 static lv_obj_t *mk_icon(lv_obj_t *parent, int tile, int on)
@@ -369,15 +375,101 @@ static lv_obj_t *mk_icon(lv_obj_t *parent, int tile, int on)
     return img;
 }
 
+/* positional icon by raw icon_alpha index — for capsules and stats */
+static lv_obj_t *mk_icon_at(lv_obj_t *parent, int idx, int on, int x, int y)
+{
+    if (!icon_dsc_ready)
+        icon_dsc_init();
+    lv_obj_t *img = lv_image_create(parent);
+    lv_image_set_src(img, &icon_dsc[idx]);
+    lv_obj_set_style_image_recolor(img, on ? C_ACCENT : C_MUTED, 0);
+    lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
+    lv_obj_set_pos(img, x, y);
+    return img;
+}
+
 /* ---- control centre ------------------------------------------------------ */
+
+static int cc_state(int i)
+{
+    switch (i) {
+    case 0: return dnd_on;
+    case 1: return airplane_on;
+    case 2: return bt_on;
+    case 3: return torch_on;
+    case 4: return ble_connected();
+    case 5: return water_lock;
+    }
+    return 0;
+}
+
+/* active tint per tile — the simulator honeycomb colours */
+static lv_color_t cc_tint(int i)
+{
+    switch (i) {
+    case 0: return lv_color_hex(0x7040C8);   /* dnd: purple   */
+    case 1: return lv_color_hex(0xDC821E);   /* air: orange   */
+    case 2: return lv_color_hex(0x2870DC);   /* bt: blue      */
+    case 3: return lv_color_hex(0xC8A01E);   /* torch: amber  */
+    case 4: return lv_color_hex(0x2870DC);   /* phone: blue   */
+    case 5: return lv_color_hex(0x1E96BE);   /* lock: teal    */
+    }
+    return lv_color_hex(0x28303C);           /* settings grey */
+}
+
+/* flat-top hexagon painted scanline by scanline, tinted when active —
+   the honeycomb the rest of VoidOS already uses */
+static void hex_draw(lv_event_t *e)
+{
+    lv_obj_t *o = lv_event_get_current_target(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    int cx = (a.x1 + a.x2) / 2, cy = (a.y1 + a.y2) / 2;
+    int r = (a.x2 - a.x1) / 2, h = (a.y2 - a.y1) / 2;
+    int i = (int)(intptr_t)lv_obj_get_user_data(o);
+    lv_draw_line_dsc_t dsc;
+    lv_draw_line_dsc_init(&dsc);
+    dsc.color = cc_state(i) ? cc_tint(i) : lv_color_hex(0x1A2230);
+    dsc.opa = LV_OPA_COVER;
+    for (int dy = -h; dy <= h; dy++) {
+        int hw = r - r * (dy < 0 ? -dy : dy) / (2 * h);
+        dsc.p1.x = cx - hw;
+        dsc.p2.x = cx + hw;
+        dsc.p1.y = dsc.p2.y = cy + dy;
+        lv_draw_line(layer, &dsc);
+    }
+}
+
+/* vertical capsule: the battery/brightness pills flanking the comb */
+static void vcap_draw(lv_event_t *e)
+{
+    lv_obj_t *o = lv_event_get_current_target(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    int pct = (int)(intptr_t)lv_obj_get_user_data(o);
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.radius = (a.x2 - a.x1) / 2;
+    dsc.bg_opa = LV_OPA_COVER;
+    dsc.bg_color = lv_color_hex(0x28303C);
+    lv_draw_rect(layer, &dsc, &a);
+    int fh = (a.y2 - a.y1) * pct / 100;
+    lv_area_t fill = a;
+    fill.y1 = a.y2 - fh;
+    dsc.bg_color = pct > 50 ? C_GOOD : C_WARN;
+    lv_draw_rect(layer, &dsc, &fill);
+}
 
 static void cc_cb(lv_event_t *e)
 {
-    if (lv_event_get_user_data(e)) {   /* brightness slider */
-        lv_obj_t *sl = lv_event_get_target(e);
-        brightness = (int)lv_slider_get_value(sl);
+    if (lv_event_get_user_data(e)) {   /* brightness capsule: tap steps */
+        brightness = brightness >= 100 ? 25 : brightness + 25;
         if (!torch_on)
             display_backlight(1 + brightness * 2 / 100);
+        persist_save();
+        rebuild();
         return;
     }
     int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
@@ -393,52 +485,78 @@ static void cc_cb(lv_event_t *e)
         ble_set_enabled(bt_on);
         break;
     case 5: water_lock ^= 1; break;
-    default: break;   /* PHONE toggle arrives with BLE data services */
+    case 6:
+        nav_to(SCR_SETTINGS);
+        return;
+    default: break;   /* PHONE ping arrives with BLE data services */
     }
+    persist_save();
     rebuild();
 }
 
 static void build_cc(lv_obj_t *r)
 {
     page_bg(r);
-    mk_header(r, "CONTROL", 0);
+    /* the simulator layout: two capsules flanking a hexagon comb —
+       no title, no cards, everything flush to the bezel */
+    mk_label_c(r, &kenney16, C_MUTED, 120, 16, "CONTROL");
 
-    mk_label(r, &kenney9, C_MUTED, 176, 30, "SUN");
-    lv_obj_t *sl = lv_slider_create(r);
-    lv_obj_set_pos(sl, 216, 40);
-    lv_obj_set_size(sl, 18, 160);
-    lv_slider_set_range(sl, 0, 100);
-    lv_slider_set_value(sl, brightness, LV_ANIM_OFF);
-    lv_obj_add_event_cb(sl, cc_cb, LV_EVENT_VALUE_CHANGED, (void *)1);
+    char bb[8];
+    lv_snprintf(bb, sizeof bb, "%d%%", hal_battery_pct());
 
-    {
-        char bb[8];
-        lv_snprintf(bb, sizeof bb, "%d%%", hal_battery_pct());
-        mk_label_c(r, &kenney9, C_MUTED, 214, 32, bb);
-    }
+    /* left capsule: battery level, icon on top, % beside */
+    lv_obj_t *cap = lv_obj_create(r);
+    lv_obj_set_pos(cap, 36, 50);
+    lv_obj_set_size(cap, 18, 76);
+    lv_obj_set_style_bg_opa(cap, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cap, 0, 0);
+    lv_obj_set_style_pad_all(cap, 0, 0);
+    lv_obj_set_user_data(cap, (void *)(intptr_t)hal_battery_pct());
+    lv_obj_add_event_cb(cap, vcap_draw, LV_EVENT_DRAW_MAIN, NULL);
+    lv_obj_remove_flag(cap, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    mk_icon_at(r, 8, 1, 33, 32);         /* battery icon above */
+    mk_label_c(r, &kenney9, C_MUTED, 45, 132, bb);
 
-    static const char *tt[6] = {"DND", "AIR", "BT", "TORCH", "PHONE", "LOCK"};
-    for (int i = 0; i < 6; i++) {
-        if ((i == 3 && (cc_hide & 1)) || (i == 4 && (cc_hide & 4)) ||
-            (i == 5 && (cc_hide & 2)))
+    /* right capsule: brightness — tap steps 25/50/75/100 */
+    lv_obj_t *bcap = lv_obj_create(r);
+    lv_obj_set_pos(bcap, 186, 50);
+    lv_obj_set_size(bcap, 18, 76);
+    lv_obj_set_style_bg_opa(bcap, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bcap, 0, 0);
+    lv_obj_set_style_pad_all(bcap, 0, 0);
+    lv_obj_set_user_data(bcap, (void *)(intptr_t)brightness);
+    lv_obj_add_event_cb(bcap, vcap_draw, LV_EVENT_DRAW_MAIN, NULL);
+    lv_obj_add_event_cb(bcap, cc_cb, LV_EVENT_CLICKED, (void *)1);
+    lv_obj_remove_flag(bcap, LV_OBJ_FLAG_SCROLLABLE);
+    mk_icon_at(r, 7, 1, 183, 32);        /* light icon above */
+    lv_snprintf(bb, sizeof bb, "%d", brightness);
+    mk_label_c(r, &kenney9, C_MUTED, 195, 132, bb);
+
+    /* honeycomb: staggered rows like the simulator comb */
+    static const int8_t hexpos[7][2] = {
+        { 91,  78}, {149,  78},          /* DND, AIR  */
+        { 63, 128}, {120, 128}, {177, 128}, /* BT, TORCH, PHONE */
+        { 91, 178}, {149, 178}           /* LOCK, SETTINGS */
+    };
+    static const uint8_t tile[7] = {0, 1, 2, 3, 4, 5, 6};
+    for (int i = 0; i < 7; i++) {
+        int t = tile[i];
+        if ((t == 3 && (cc_hide & 1)) || (t == 4 && (cc_hide & 4)) ||
+            (t == 5 && (cc_hide & 2)))
             continue;
-        int x = 44 + (i % 3) * 66, y = 66 + (i / 3) * 70;
-        int on = (i == 0) ? dnd_on : (i == 1) ? airplane_on :
-                 (i == 2) ? bt_on : (i == 3) ? torch_on :
-                 (i == 4) ? ble_connected() : (i == 5) ? water_lock : 0;
-        lv_obj_t *b = mk_btn(r, tt[i], x - 31, y - 31, 62, 62,
-                             on ? C_ACCENT : C_FILL, cc_cb);
-        lv_obj_set_style_radius(b, 18, 0);
-        lv_obj_t *txt = lv_obj_get_child(b, 0);
-        lv_obj_set_style_text_font(txt, &kenney9, 0);
-        lv_obj_set_style_text_color(txt, on ? C_BG : C_MUTED, 0);
-        lv_obj_align(txt, LV_ALIGN_BOTTOM_MID, 0, -6);
-        lv_obj_t *ic = mk_icon(b, i, on);
-        lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 6);
-        lv_obj_set_user_data(b, (void *)(intptr_t)i);
+        lv_obj_t *hx = lv_obj_create(r);
+        lv_obj_set_pos(hx, hexpos[i][0] - 30, hexpos[i][1] - 26);
+        lv_obj_set_size(hx, 60, 52);
+        lv_obj_set_style_bg_opa(hx, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(hx, 0, 0);
+        lv_obj_set_style_pad_all(hx, 0, 0);
+        lv_obj_remove_flag(hx, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_user_data(hx, (void *)(intptr_t)t);
+        lv_obj_add_event_cb(hx, hex_draw, LV_EVENT_DRAW_MAIN, NULL);
+        lv_obj_add_event_cb(hx, cc_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t *ic = mk_icon(hx, t, cc_state(t));
+        lv_obj_center(ic);
     }
-    /* gesture hints removed: the swipe map is learned; bare labels just
-       looked techy */
 }
 
 /* ---- launcher ------------------------------------------------------------- */
@@ -877,46 +995,111 @@ static void ppg_draw(lv_event_t *ev)
     }
 }
 
+/* one simulator stat card: sharp-cornered fill, small muted label
+   top-left, coloured value right-aligned */
+static void stat_card(lv_obj_t *r, int x, int y, const char *lab,
+                      const char *val, lv_color_t vc, int icon)
+{
+    lv_obj_t *c = lv_obj_create(r);
+    lv_obj_set_pos(c, x, y);
+    lv_obj_set_size(c, 96, 44);
+    lv_obj_set_style_bg_color(c, lv_color_hex(0x1A2230), 0);
+    lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(c, 4, 0);
+    lv_obj_set_style_border_width(c, 0, 0);
+    lv_obj_set_style_pad_all(c, 0, 0);
+    lv_obj_remove_flag(c, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    if (icon >= 0)
+        mk_icon_at(c, icon, 0, 6, 10);
+    mk_label(c, &kenney9, C_MUTED, icon >= 0 ? 34 : 8, 7, lab);
+    mk_label(c, &kenney16, vc, icon >= 0 ? 34 : 8, 20, val);
+}
+
 static void build_stats(lv_obj_t *r)
 {
     page_bg(r);
-    mk_header(r, "STATS", 1);
-    char buf[32];
+    mk_label_c(r, &kenney16, C_MUTED, 120, 12, "STATS");
+    char buf[24];
     int steps = ui_steps();
-    lv_snprintf(buf, sizeof buf, "STEPS  %s", steps >= 0 ? "" : "--");
-    if (steps >= 0)
-        lv_snprintf(buf, sizeof buf, "STEPS  %d", steps);
-    mk_label_c(r, &kenney16, C_WHITE, 120, 64, buf);
     int bpm = sensors_bpm();
-    lv_snprintf(buf, sizeof buf, "BPM    %s",
-                bpm > 0 ? "" : bpm == 0 ? "SENSING" : "--");
-    if (bpm > 0)
-        lv_snprintf(buf, sizeof buf, "BPM    %d", bpm);
-    mk_label_c(r, &kenney16, C_WHITE, 120, 92, buf);
-    lv_snprintf(buf, sizeof buf, "WATER  %d ML", water_ml);
-    mk_label_c(r, &kenney16, C_ACCENT, 120, 120, buf);
-    lv_snprintf(buf, sizeof buf, "SETS   %d", w_sets);
-    mk_label_c(r, &kenney16, C_WHITE, 120, 148, buf);
-    if (!sensors_bma_ok())
-        mk_label_c(r, &kenney9, C_WARN, 120, 200, "ACCEL OFFLINE");
-    if (!sensors_hrs_ok())
-        mk_label_c(r, &kenney9, C_WARN, 120, 214, "HR SENSOR OFFLINE");
-    int s, ac, rc, ge, at;
-    ble_diag(&s, &ac, &rc, &ge, &at);
-    lv_snprintf(buf, sizeof buf, "BLE S%d A%d E%d BAT %d%%", s, ac, rc,
-                hal_battery_pct());
-    mk_label_c(r, &kenney9, C_MUTED, 120, 172, buf);
 
-    /* live PPG trace — real optical signal, full width */
+    lv_snprintf(buf, sizeof buf, "%d", steps >= 0 ? steps : 0);
+    stat_card(r, 18, 40, "STEPS", steps >= 0 ? buf : "--", C_WHITE, 14);
+    lv_snprintf(buf, sizeof buf, "%d BPM", bpm > 0 ? bpm : 0);
+    stat_card(r, 126, 40, "HEART",
+              bpm > 0 ? buf : (bpm == 0 ? "SENS" : "--"), C_ACCENT, -1);
+
+    stat_card(r, 18, 90, "RESTING", "--", C_WHITE, -1);
+    stat_card(r, 126, 90, "HRV", "--", C_ACCENT, -1);
+
+    stat_card(r, 18, 140, "SLEEP", s_track ? "ON" : "OFF", C_WHITE, -1);
+    lv_snprintf(buf, sizeof buf, "%d ML", water_ml);
+    stat_card(r, 126, 140, "WATER", buf, lv_color_hex(0x1E96BE), 5);
+
+    /* workout status strip — same flat bar as the simulator */
+    lv_obj_t *bar = lv_obj_create(r);
+    lv_obj_set_pos(bar, 18, 196);
+    lv_obj_set_size(bar, 204, 26);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x1A2230), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(bar, 4, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    mk_label(bar, &kenney9, C_MUTED, 8, 9,
+             w_active ? "WORKOUT LIVE" : "WORKOUT");
+    if (w_active) {
+        lv_snprintf(buf, sizeof buf, "%d SETS", w_sets);
+        mk_label(bar, &kenney9, C_ACCENT, 140, 9, buf);
+    } else {
+        mk_label(bar, &kenney9, C_MUTED, 152, 9, "NO SAVE");
+    }
+}
+
+/* ---- notifications + cardio ------------------------------------------------ */
+
+static void build_notif(lv_obj_t *r)
+{
+    page_bg(r);
+    mk_label_c(r, &kenney16, C_MUTED, 120, 32, "NOTIFICATIONS");
+    mk_icon_at(r, 13, 0, 108, 96);       /* cloud */
+    mk_label_c(r, &kenney16, C_WHITE, 120, 140, "INBOX ZERO");
+    mk_label_c(r, &kenney9, C_MUTED, 120, 160, "ALL CAUGHT UP");
+}
+
+static lv_obj_t *cardio_trace;
+static lv_obj_t *cardio_bpm;
+
+static void build_cardio(lv_obj_t *r)
+{
+    page_bg(r);
+    mk_label_c(r, &kenney16, C_MUTED, 120, 12, "CARDIO");
+
+    /* big live BPM — the number is the point */
+    int bpm = sensors_bpm();
+    char buf[16];
+    if (bpm > 0)
+        lv_snprintf(buf, sizeof buf, "%d", bpm);
+    else
+        lv_snprintf(buf, sizeof buf, bpm == 0 ? "--" : "OFF");
+    cardio_bpm = mk_label_c(r, &kenney56, C_ACCENT, 120, 58, buf);
+    mk_label_c(r, &kenney9, C_MUTED, 120, 108,
+               bpm > 0 ? "BPM" : bpm == 0 ? "SENSING" : "NO HRS");
+
+    /* full-width live PPG — the real optical signal */
     lv_obj_t *t = lv_obj_create(r);
-    lv_obj_set_pos(t, 12, 190);
-    lv_obj_set_size(t, 216, 42);
-    lv_obj_set_style_bg_opa(t, LV_OPA_TRANSP, 0);
+    lv_obj_set_pos(t, 8, 124);
+    lv_obj_set_size(t, 224, 90);
+    lv_obj_set_style_bg_color(t, lv_color_hex(0x0B0E14), 0);
+    lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(t, 4, 0);
     lv_obj_set_style_border_width(t, 0, 0);
     lv_obj_set_style_pad_all(t, 0, 0);
     lv_obj_remove_flag(t, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(t, ppg_draw, LV_EVENT_DRAW_MAIN, NULL);
-    stats_trace = t;
+    cardio_trace = t;
+
+    mk_label_c(r, &kenney9, C_MUTED, 120, 220, "HRS3300 OPTICAL");
 }
 
 /* ---- dispatch ------------------------------------------------------------------ */
@@ -925,6 +1108,8 @@ static void rebuild(void)
 {
     lv_obj_clean(root);
     lbl_time_big = NULL;
+    cardio_trace = NULL;
+    cardio_bpm = NULL;
     switch (cur) {
     case SCR_FACE:      ui_face_build(root); break;
     case SCR_LAUNCHER:  build_launcher(root); break;
@@ -939,6 +1124,8 @@ static void rebuild(void)
     case SCR_SETTINGS:  build_settings(root); break;
     case SCR_STATS:     build_stats(root); break;
     case SCR_SETTIME:   build_settime(root); break;
+    case SCR_NOTIF:     build_notif(root); break;
+    case SCR_CARDIO:    build_cardio(root); break;
     }
 }
 
@@ -950,12 +1137,8 @@ void ui_init(void)
     lv_obj_set_style_pad_all(root, 0, 0);
     lv_obj_set_style_border_width(root, 0, 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
-    lv_obj_add_flag(root, LV_OBJ_FLAG_CLICKABLE);
-    /* no LV_EVENT_GESTURE handler: the CST816S detects gestures in
-       hardware (ui_swipe). LVGL's own detection used to run too and
-       re-navigated on an inverted direction map — every swipe down
-       bounced the control centre straight back to the face */
-    lv_obj_add_event_cb(root, tap_cb, LV_EVENT_CLICKED, NULL);
+    /* no LV_EVENT_GESTURE or CLICKED handler: the CST816S detects
+       gestures in hardware (ui_swipe) and taps never navigate */
     persist_load();
     if (!bt_on)
         ble_set_enabled(0);
@@ -979,10 +1162,36 @@ void ui_tick(void)
         display_backlight(0);
         persist_save();
     }
-    /* raise-to-wake: the BMA425 feature engine detects the gesture
-       on-chip and flags INT_STAT_1 bit3 — self-debounced, no tilt maths */
-    if (asleep && sensors_wrist_raise())
-        ui_wake();
+    /* raise-to-wake: the Bosch engine's wrist-wear flag is the primary
+       detector; if the engine never loaded, fall back to a sustained
+       tilt change (>0.5 g-equivalent held for ~8 ticks) with slow
+       drift tracking so a resting wrist can't keep re-firing it */
+    if (asleep) {
+        static int tilt_streak;
+        static int32_t sleep_az = 0x7FFFFFFF;
+        if (sensors_wrist_raise()) {
+            ui_wake();
+            tilt_streak = 0;
+            sleep_az = 0x7FFFFFFF;
+        } else {
+            int z = sensors_bma_z();
+            if (sleep_az == 0x7FFFFFFF)
+                sleep_az = z;
+            int32_t dz = z - sleep_az;
+            if (dz < 0)
+                dz = -dz;
+            if (dz > 600) {
+                if (++tilt_streak >= 8) {
+                    ui_wake();
+                    tilt_streak = 0;
+                    sleep_az = 0x7FFFFFFF;
+                }
+            } else {
+                tilt_streak = 0;
+                sleep_az += (z - sleep_az) >> 4;
+            }
+        }
+    }
     /* side button as nav fallback while touch is unreliable: a release
        before the 3 s reset threshold steps through screens */
     static int was_held;
@@ -1021,12 +1230,22 @@ void ui_tick(void)
     case SCR_FACE:
         ui_face_tick();
         break;
-    case SCR_STATS:
-        if (stats_trace) {
+    case SCR_CARDIO:
+        if (cardio_trace) {
             static uint32_t last_tr;
             if (now - last_tr >= 100) {
                 last_tr = now;
-                lv_obj_invalidate(stats_trace);
+                lv_obj_invalidate(cardio_trace);
+            }
+        }
+        if (cardio_bpm) {
+            static int last_bpm = -2;
+            int bpm = sensors_bpm();
+            if (bpm != last_bpm) {
+                last_bpm = bpm;
+                char buf[16];
+                lv_snprintf(buf, sizeof buf, "%d", bpm > 0 ? bpm : 0);
+                lv_label_set_text(cardio_bpm, bpm > 0 ? buf : "--");
             }
         }
         break;

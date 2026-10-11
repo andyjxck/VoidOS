@@ -424,6 +424,7 @@ int sensors_wrist_raise(void)
         return 0;
     return (v & 0x08) ? 1 : 0;
 }
+int sensors_bma_engine(void) { return bma_engine; }
 int sensors_hrs_ok(void)  { return hrs_ok; }
 int sensors_hrs_raw(void)   { return (int)hrs_raw; }
 int sensors_hrs_ac(void)    { return (int)win_max; }

@@ -7,10 +7,11 @@ void display_init(void);
 void display_send(int x0, int y0, int x1, int y1, const uint16_t *px);
 int touch_sample(int *x, int *y);
 int touch_gesture(void);
+int touch_gesture_x(void);
 uint32_t hal_millis_raw(void);
 int ui_asleep(void);
 void ui_wake(void);
-void ui_swipe(int cst_dir);
+void ui_swipe(int cst_dir, int start_x);
 
 /* partial-render buffer: LVGL renders into this, we push it to the LCD */
 static uint16_t draw_buf[240 * 32];
@@ -49,7 +50,7 @@ static void read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
     int g = touch_gesture();
     if (g >= 1 && g <= 4) {
-        ui_swipe(g);
+        ui_swipe(g, touch_gesture_x());
         eat_touch = 1;
     }
     if (eat_touch) {

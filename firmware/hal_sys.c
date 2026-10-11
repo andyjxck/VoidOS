@@ -421,6 +421,7 @@ int i2c_write_regs(uint8_t addr, uint8_t reg, const uint8_t *src, unsigned n)
 static int touch_ok;
 static int touch_was_down;
 static int last_gesture;
+static int last_gesture_x;
 
 static void touch_init(void)
 {
@@ -534,6 +535,7 @@ int touch_sample(int *x, int *y)
         prev_gest = 0;
     if (d[1] && d[1] != prev_gest) {
         last_gesture = d[1];                 /* CST816S gesture ID */
+        last_gesture_x = *x;                 /* which half it landed on */
         prev_gest = d[1];
     }
     touch_was_down = (fingers != 0 && event != 1);
@@ -547,6 +549,13 @@ int touch_gesture(void)
     int g = last_gesture;
     last_gesture = 0;
     return g;
+}
+
+/* X coordinate captured when the current gesture latched — lets the
+   nav layer tell a left-half down-swipe from a right-half one */
+int touch_gesture_x(void)
+{
+    return last_gesture_x;
 }
 
 /* ---- HAL entry points --------------------------------------------------- */

@@ -28,6 +28,7 @@ ICONS = [
     "bluetooth_disabled_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.png",
     "flashlight_off_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.png",
     "cloud.png",
+    "footprint_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.png",
 ]
 LOGO = "Gemini_Generated_Image_3ig0p63ig0p63ig0-removebg-preview.png"
 LOGO_PX = 112

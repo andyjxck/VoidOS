@@ -361,15 +361,17 @@ static int diag_read2(struct os_mbuf *om)
     extern int sensors_hrs_ok(void), sensors_bma_ok(void);
     extern int sensors_hrs_raw(void), sensors_hrs_ac(void);
     extern int sensors_hrs_beats(void), sensors_hrs_ibi(void);
+    extern int sensors_bma_engine(void);
     extern int hal_clock_synced(void);
     int n = snprintf(s, sizeof s,
-        "I%02X%02X%02X M%d H%d.%d r%d a%d b%ui%u S%d.%d t%d D%dC%dP%dN%d",
+        "I%02X%02X%02X M%d H%d.%d r%d a%d b%ui%u S%d.%d e%d t%d D%dC%dP%dN%d",
         touch_diag.scan[0], touch_diag.scan[1], touch_diag.scan[2],
         os_msys_num_free(),
         sensors_hrs_ok(), sensors_bpm(),
         sensors_hrs_raw(), sensors_hrs_ac(), sensors_hrs_beats(),
         sensors_hrs_ibi(),
-        sensors_bma_ok(), sensors_steps(), hal_clock_synced(),
+        sensors_bma_ok(), sensors_steps(), sensors_bma_engine(),
+        hal_clock_synced(),
         dfu_state, d_ctrl_writes, d_pkt_writes, d_notify_rc);
     return diag_put(om, s, n);
 }
