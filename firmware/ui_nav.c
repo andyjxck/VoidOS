@@ -64,6 +64,7 @@ static uint32_t sw_t0, sw_acc;
 static uint32_t timer_end_ms;
 static int timer_done;
 static uint32_t motor_off_at;
+static int resting_bpm;         /* lowest BPM seen this session */
 static int alarm_on = 1;
 
 /* navigation */
@@ -490,20 +491,27 @@ static void cc_cb(lv_event_t *e)
     int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
     switch (i) {
     case 0: dnd_on ^= 1; break;
-    case 1: airplane_on ^= 1; break;
+    case 1:
+        airplane_on ^= 1;
+        /* airplane kills the radio outright, on top of the BT toggle */
+        ble_set_enabled(bt_on && !airplane_on);
+        break;
     case 3:
         torch_on ^= 1;
         display_backlight(torch_on ? 3 : 1 + brightness * 2 / 100);
         break;
     case 2:
         bt_on ^= 1;
-        ble_set_enabled(bt_on);
+        ble_set_enabled(bt_on && !airplane_on);
         break;
+    case 4:
+        nav_to(SCR_NOTIF);
+        return;                     /* phone tile = notifications   */
     case 5: water_lock ^= 1; break;
     case 6:
         nav_to(SCR_SETTINGS);
         return;
-    default: break;   /* PHONE ping arrives with BLE data services */
+    default: break;
     }
     persist_save();
     rebuild();
@@ -1031,10 +1039,20 @@ static void build_stats(lv_obj_t *r)
     stat_card(r, 126, 40, "HEART",
               bpm > 0 ? buf : (bpm == 0 ? "SENS" : "--"), C_ACCENT, -1);
 
-    stat_card(r, 18, 90, "RESTING", "--", C_WHITE, -1);
+    lv_snprintf(buf, sizeof buf, "%d", resting_bpm);
+    stat_card(r, 18, 90, "RESTING", resting_bpm ? buf : "--",
+              C_WHITE, -1);
     stat_card(r, 126, 90, "HRV", "--", C_ACCENT, -1);
 
-    stat_card(r, 18, 140, "SLEEP", s_track ? "ON" : "OFF", C_WHITE, -1);
+    if (s_in_bed) {
+        lv_snprintf(buf, sizeof buf, "IN BED");
+    } else if (s_last_ms) {
+        unsigned sm = s_last_ms / 60000;
+        lv_snprintf(buf, sizeof buf, "%uH %uM", sm / 60, sm % 60);
+    } else {
+        lv_snprintf(buf, sizeof buf, "--");
+    }
+    stat_card(r, 18, 140, "SLEEP", buf, C_WHITE, -1);
     lv_snprintf(buf, sizeof buf, "%d ML", water_ml);
     stat_card(r, 126, 140, "WATER", buf, lv_color_hex(0x1E96BE), 5);
 
@@ -1060,13 +1078,162 @@ static void build_stats(lv_obj_t *r)
 
 /* ---- notifications + cardio ------------------------------------------------ */
 
+/* ---- notifications -------------------------------------------------------- */
+
+int ancs_ready(void), ancs_state(void), ancs_count(void);
+int ancs_take_dirty(void), ancs_take_new(void);
+struct ancs_notif_view {
+    uint32_t uid; uint8_t flags; uint8_t has_pos, has_neg;
+    const char *app, *title, *msg; uint32_t rx_ms;
+};
+const struct ancs_notif_view *ancs_get(int i);
+void ancs_dismiss(uint32_t uid);
+void ancs_positive(uint32_t uid);
+
+static int notif_sel = -1;         /* -1 = list, >=0 = detail view */
+static int notif_reply;            /* 1 = quick-reply picker open */
+
+static void notif_item_cb(lv_event_t *e)
+{
+    notif_sel = (int)(intptr_t)lv_obj_get_user_data(
+        lv_event_get_target(e));
+    rebuild();
+}
+
+static void notif_back_cb(lv_event_t *e)
+{
+    (void)e;
+    notif_sel = -1;
+    notif_reply = 0;
+    rebuild();
+}
+
+static void notif_dismiss_cb(lv_event_t *e)
+{
+    (void)e;
+    const struct ancs_notif_view *v = ancs_get(notif_sel);
+    if (v)
+        ancs_dismiss(v->uid);
+    notif_sel = -1;
+    notif_reply = 0;
+    rebuild();
+}
+
+static void notif_reply_cb(lv_event_t *e)
+{
+    (void)e;
+    notif_reply = 1;
+    rebuild();
+}
+
+static void notif_send_cb(lv_event_t *e)
+{
+    (void)e;
+    /* ActionIDPositive fires the notification's reply action on the
+       phone — for Messages that hands off to iOS to handle the text */
+    const struct ancs_notif_view *v = ancs_get(notif_sel);
+    if (v)
+        ancs_positive(v->uid);
+    notif_sel = -1;
+    notif_reply = 0;
+    rebuild();
+}
+
 static void build_notif(lv_obj_t *r)
 {
     page_bg(r);
-    mk_label_c(r, &kenney16, C_MUTED, 120, 32, "NOTIFICATIONS");
-    mk_icon_at(r, 13, 0, 108, 96);       /* cloud */
-    mk_label_c(r, &kenney16, C_WHITE, 120, 140, "INBOX ZERO");
-    mk_label_c(r, &kenney9, C_MUTED, 120, 160, "ALL CAUGHT UP");
+
+    if (notif_sel >= 0) {
+        /* detail: app + title + body, actions at the bottom */
+        const struct ancs_notif_view *v = ancs_get(notif_sel);
+        if (!v) {
+            notif_sel = -1;
+            rebuild();
+            return;
+        }
+        mk_btn(r, "<", 12, 10, 36, 26, C_FILL, notif_back_cb);
+        mk_label(r, &kenney9, C_MUTED, 56, 16,
+                 v->app[0] ? v->app : "NOTIFICATION");
+        lv_obj_t *t = mk_label(r, &kenney16, C_WHITE, 16, 44,
+                               v->title[0] ? v->title : "(NO TITLE)");
+        lv_obj_set_width(t, 208);
+        lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
+        lv_obj_t *m = mk_label(r, &kenney9, C_MUTED, 16, 78, v->msg);
+        lv_obj_set_width(m, 208);
+        lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
+
+        if (notif_reply) {
+            /* canned replies — sent as the notification's positive
+               action; real typed replies need a companion relay */
+            static const char *qr[4] = {"OK", "YES", "NO", "CALL YOU"};
+            for (int i = 0; i < 4; i++) {
+                lv_obj_t *b = mk_btn(r, qr[i], 16 + (i % 2) * 106,
+                                     152 + (i / 2) * 40, 100, 34,
+                                     C_FILL, notif_send_cb);
+                lv_obj_set_user_data(b, (void *)(intptr_t)i);
+            }
+        } else {
+            mk_btn(r, "REPLY", 16, 186, 100, 34, C_FILL, notif_reply_cb);
+            mk_btn(r, "DISMISS", 124, 186, 100, 34, C_FILL,
+                   notif_dismiss_cb);
+        }
+        return;
+    }
+
+    mk_label_c(r, &kenney16, C_MUTED, 120, 14, "NOTIFICATIONS");
+
+    if (!ble_connected()) {
+        mk_label_c(r, &kenney9, C_WARN, 120, 110, "PHONE NOT CONNECTED");
+        mk_label_c(r, &kenney9, C_MUTED, 120, 130,
+                   "PAIR FOR NOTIFICATIONS");
+        return;
+    }
+    if (ancs_state() < 6 /* ST_LIVE */) {
+        mk_label_c(r, &kenney9, C_MUTED, 120, 110, "SYNCING...");
+        mk_label_c(r, &kenney9, C_MUTED, 120, 130,
+                   "ANCS HANDSHAKE");
+        return;
+    }
+    if (!ancs_count()) {
+        mk_icon_at(r, 13, 0, 108, 80);   /* cloud */
+        mk_label_c(r, &kenney16, C_WHITE, 120, 118, "INBOX ZERO");
+        mk_label_c(r, &kenney9, C_MUTED, 120, 140, "ALL CAUGHT UP");
+        return;
+    }
+
+    for (int i = 0; i < ancs_count() && i < 4; i++) {
+        const struct ancs_notif_view *v = ancs_get(i);
+        if (!v)
+            continue;
+        int y = 40 + i * 48;
+        lv_obj_t *row = lv_obj_create(r);
+        lv_obj_set_pos(row, 12, y);
+        lv_obj_set_size(row, 216, 44);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x1A2230), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_user_data(row, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(row, notif_item_cb, LV_EVENT_CLICKED, NULL);
+        /* unread marker */
+        lv_obj_t *dot = lv_obj_create(row);
+        lv_obj_set_pos(dot, 8, 18);
+        lv_obj_set_size(dot, 7, 7);
+        lv_obj_set_style_bg_color(dot, C_ACCENT, 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(dot, 4, 0);
+        lv_obj_set_style_border_width(dot, 0, 0);
+        lv_obj_remove_flag(dot,
+                           LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        mk_label(row, &kenney9, C_MUTED, 24, 6,
+                 v->app[0] ? v->app : "APP");
+        lv_obj_t *tl = mk_label(row, &kenney16, C_WHITE, 24, 20,
+                                v->title[0] ? v->title : v->msg);
+        lv_obj_set_width(tl, 184);
+        lv_label_set_long_mode(tl, LV_LABEL_LONG_DOT);
+    }
 }
 
 static lv_obj_t *cardio_trace;
@@ -1227,6 +1394,21 @@ void ui_tick(void)
     if (motor_off_at && now >= motor_off_at) {
         motor_off_at = 0;
         hal_motor(0);
+    }
+    /* incoming notification: buzz + wake unless DND is on */
+    if (ancs_take_new() && !dnd_on) {
+        hal_motor(1);
+        motor_off_at = now + 250;
+        if (asleep)
+            ui_wake();
+    }
+    if (cur == SCR_NOTIF && ancs_take_dirty())
+        rebuild();
+    /* resting HR = lowest sustained reading this session */
+    {
+        int b = sensors_bpm();
+        if (b > 0 && (resting_bpm == 0 || b < resting_bpm))
+            resting_bpm = b;
     }
     switch (cur) {
     case SCR_FACE:

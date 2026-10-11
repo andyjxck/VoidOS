@@ -1,0 +1,374 @@
+/* VoidOS ANCS client: pulls real notifications from the iPhone over
+   the Apple Notification Center Service. The phone stays the GAP
+   central; we act as a GATT client on the same link, exactly like
+   every other watch that speaks ANCS.
+
+   Flow: on connect, discover the ANCS service + its three
+   characteristics + their CCCDs, subscribe to Notification Source and
+   Data Source, then fetch attributes for every incoming notification.
+   The subscribe usually fails once with insufficient authentication —
+   iOS then pairs us, and we retry after ENC setup. */
+#include <string.h>
+#include <stdint.h>
+#include "os/os.h"
+#include "host/ble_hs.h"
+#include "host/ble_gatt.h"
+#include "host/ble_gap.h"
+#include "host/ble_uuid.h"
+
+uint32_t hal_millis(void);
+
+/* ANCS UUIDs, wire order (little-endian, reversed from canonical) */
+static const ble_uuid128_t uuid_ancs = BLE_UUID128_INIT(
+    0xd0, 0x00, 0x2d, 0x12, 0x1e, 0x4b, 0x0f, 0xa4,
+    0x99, 0x4e, 0xce, 0xb5, 0x51, 0xf6, 0x05, 0x79);
+static const ble_uuid128_t uuid_ns = BLE_UUID128_INIT(
+    0xbd, 0x1d, 0xa2, 0x99, 0xe6, 0x25, 0x58, 0x8c,
+    0xd9, 0x42, 0x01, 0x63, 0x0d, 0x12, 0xbf, 0x9f);
+static const ble_uuid128_t uuid_cp = BLE_UUID128_INIT(
+    0xd9, 0xd9, 0xaa, 0xfd, 0xbd, 0x9b, 0x21, 0x98,
+    0xa8, 0x49, 0xe1, 0x45, 0xf3, 0xd8, 0xd1, 0x69);
+static const ble_uuid128_t uuid_ds = BLE_UUID128_INIT(
+    0xfb, 0x7b, 0x7c, 0xce, 0x6a, 0xb3, 0x44, 0xbe,
+    0xb5, 0x4b, 0xd6, 0x24, 0xe9, 0xc6, 0xea, 0x22);
+
+/* notification store shown on the NOTIF screen */
+#define ANCS_MAX_NOTIFS 6
+struct ancs_notif {
+    uint32_t uid;
+    uint8_t flags;          /* ANCS event flags (silent/important/…) */
+    uint8_t has_pos, has_neg;
+    uint32_t rx_ms;
+    char app[20];
+    char title[48];
+    char msg[128];
+};
+static struct ancs_notif notifs[ANCS_MAX_NOTIFS];
+static int notif_count;
+static int new_notif;       /* set on arrival, UI consumes for the buzz */
+static int notif_dirty;     /* set whenever the list changed */
+
+enum { ST_IDLE, ST_SVC, ST_CHR, ST_DSC, ST_SUB_NS, ST_SUB_DS, ST_LIVE };
+static int state;
+static uint16_t a_conn;
+static uint16_t svc_start, svc_end;
+static uint16_t h_ns_val, h_ns_cccd, h_ds_val, h_ds_cccd, h_cp_val;
+static uint32_t disc_retry_at;
+
+/* Data Source responses can fragment across notifications; accumulate */
+static uint8_t ds_buf[560];
+static int ds_len;
+static uint32_t pending_uid;
+
+int ancs_ready(void)     { return state == ST_LIVE; }
+int ancs_state(void)     { return state; }
+int ancs_count(void)     { return notif_count; }
+int ancs_take_dirty(void){ int d = notif_dirty; notif_dirty = 0; return d; }
+int ancs_take_new(void)  { int d = new_notif; new_notif = 0; return d; }
+
+struct ancs_notif_view {
+    uint32_t uid; uint8_t flags; uint8_t has_pos, has_neg;
+    const char *app, *title, *msg; uint32_t rx_ms;
+};
+static struct ancs_notif_view ancs_view;
+const struct ancs_notif_view *ancs_get(int i)
+{
+    if (i < 0 || i >= notif_count)
+        return NULL;
+    struct ancs_notif *n = &notifs[i];
+    ancs_view.uid = n->uid;
+    ancs_view.flags = n->flags;
+    ancs_view.has_pos = n->has_pos;
+    ancs_view.has_neg = n->has_neg;
+    ancs_view.app = n->app;
+    ancs_view.title = n->title;
+    ancs_view.msg = n->msg;
+    ancs_view.rx_ms = n->rx_ms;
+    return &ancs_view;
+}
+
+static struct ancs_notif *slot_for(uint32_t uid)
+{
+    for (int i = 0; i < notif_count; i++)
+        if (notifs[i].uid == uid)
+            return &notifs[i];
+    if (notif_count < ANCS_MAX_NOTIFS)
+        return &notifs[notif_count++];
+    /* drop the oldest */
+    memmove(notifs, notifs + 1, sizeof notifs[0] * (ANCS_MAX_NOTIFS - 1));
+    return &notifs[ANCS_MAX_NOTIFS - 1];
+}
+
+static void slot_drop(uint32_t uid)
+{
+    for (int i = 0; i < notif_count; i++) {
+        if (notifs[i].uid == uid) {
+            memmove(&notifs[i], &notifs[i + 1],
+                    sizeof notifs[0] * (notif_count - i - 1));
+            notif_count--;
+            notif_dirty = 1;
+            return;
+        }
+    }
+}
+
+static void cp_write(const uint8_t *cmd, int len)
+{
+    if (h_cp_val)
+        ble_gattc_write_flat(a_conn, h_cp_val, cmd, len, NULL, NULL);
+}
+
+/* ask the phone for a notification's attributes */
+static void fetch_attrs(uint32_t uid)
+{
+    uint8_t req[5 + 1 + 3 + 1 + 3 + 1 + 1 + 1 + 1];
+    int n = 0;
+    req[n++] = 0x00;                 /* GetNotificationAttributes */
+    req[n++] = uid & 0xFF;
+    req[n++] = (uid >> 8) & 0xFF;
+    req[n++] = (uid >> 16) & 0xFF;
+    req[n++] = (uid >> 24) & 0xFF;
+    req[n++] = 0x00;                 /* AppIdentifier, full len */
+    req[n++] = 0x01;                 /* Title */
+    req[n++] = 48; req[n++] = 0x00;
+    req[n++] = 0x02;                 /* Subtitle */
+    req[n++] = 0x03;                 /* Message */
+    req[n++] = 128; req[n++] = 0x00;
+    req[n++] = 0x05;                 /* Date */
+    req[n++] = 0x06;                 /* PositiveActionLabel */
+    req[n++] = 0x07;                 /* NegativeActionLabel */
+    pending_uid = uid;
+    ds_len = 0;
+    cp_write(req, n);
+}
+
+void ancs_dismiss(uint32_t uid)
+{
+    uint8_t req[6] = {0x02, uid & 0xFF, (uid >> 8) & 0xFF,
+                      (uid >> 16) & 0xFF, (uid >> 24) & 0xFF, 0x01};
+    cp_write(req, sizeof req);
+    slot_drop(uid);
+}
+
+void ancs_positive(uint32_t uid)
+{
+    uint8_t req[6] = {0x02, uid & 0xFF, (uid >> 8) & 0xFF,
+                      (uid >> 16) & 0xFF, (uid >> 24) & 0xFF, 0x00};
+    cp_write(req, sizeof req);
+}
+
+/* ---- incoming data ------------------------------------------------------- */
+
+static void on_ds(const uint8_t *d, int len)
+{
+    if (ds_len + len > (int)sizeof ds_buf) {
+        ds_len = 0;
+        return;                      /* runaway; drop and resync */
+    }
+    memcpy(ds_buf + ds_len, d, len);
+    ds_len += len;
+    if (ds_len < 5 || ds_buf[0] != 0x00)
+        return;
+    uint32_t uid = ds_buf[1] | (ds_buf[2] << 8) |
+                   ((uint32_t)ds_buf[3] << 16) | ((uint32_t)ds_buf[4] << 24);
+    struct ancs_notif *n = slot_for(uid);
+    int p = 5, complete = 1;
+    while (p < ds_len) {
+        if (p + 3 > ds_len) { complete = 0; break; }
+        int attr = ds_buf[p];
+        int alen = ds_buf[p + 1] | (ds_buf[p + 2] << 8);
+        if (p + 3 + alen > ds_len) { complete = 0; break; }
+        const uint8_t *v = ds_buf + p + 3;
+        int cl = alen;
+        switch (attr) {
+        case 0: {                    /* AppIdentifier -> friendly name */
+            const char *s = (const char *)v;
+            const char *dot = strrchr(s, '.');
+            s = dot ? dot + 1 : s;
+            int i = 0;
+            for (; s[i] && i < (int)sizeof n->app - 1; i++)
+                n->app[i] = (s[i] >= 'a' && s[i] <= 'z')
+                            ? s[i] - 32 : s[i];
+            n->app[i] = 0;
+            break;
+        }
+        case 1:
+            if (cl >= (int)sizeof n->title) cl = sizeof n->title - 1;
+            memcpy(n->title, v, cl); n->title[cl] = 0;
+            break;
+        case 3:
+            if (cl >= (int)sizeof n->msg) cl = sizeof n->msg - 1;
+            memcpy(n->msg, v, cl); n->msg[cl] = 0;
+            break;
+        case 6: n->has_pos = cl > 0; break;
+        case 7: n->has_neg = cl > 0; break;
+        }
+        p += 3 + alen;
+    }
+    if (complete) {
+        ds_len = 0;
+        notif_dirty = 1;
+    }
+}
+
+static void on_ns(const uint8_t *d, int len)
+{
+    if (len < 8)
+        return;
+    uint8_t ev = d[0], flags = d[1];
+    uint32_t uid = d[4] | (d[5] << 8) |
+                   ((uint32_t)d[6] << 16) | ((uint32_t)d[7] << 24);
+    if (ev == 2) {                   /* removed on the phone */
+        slot_drop(uid);
+        return;
+    }
+    if (ev > 1)
+        return;                      /* reserved event ids */
+    struct ancs_notif *n = slot_for(uid);
+    if (n->rx_ms == 0) {             /* genuinely new */
+        n->flags = flags;
+        n->rx_ms = hal_millis();
+        n->app[0] = n->title[0] = n->msg[0] = 0;
+        n->has_pos = n->has_neg = 0;
+        new_notif = 1;
+    }
+    fetch_attrs(uid);
+}
+
+void ancs_on_notify(uint16_t attr_handle, struct os_mbuf *om)
+{
+    uint8_t d[64];
+    int len = OS_MBUF_PKTLEN(om);
+    if (len > (int)sizeof d)
+        len = sizeof d;
+    os_mbuf_copydata(om, 0, len, d);
+    if (attr_handle == h_ns_val)
+        on_ns(d, len);
+    else if (attr_handle == h_ds_val)
+        on_ds(d, len);
+}
+
+/* ---- discovery state machine --------------------------------------------- */
+
+static int sub_done(uint16_t conn, const struct ble_gatt_error *err,
+                    struct ble_gatt_attr *attr, void *arg)
+{
+    (void)conn; (void)err; (void)attr; (void)arg;
+    if (state == ST_SUB_NS) {
+        state = ST_SUB_DS;
+        uint8_t on[2] = {1, 0};
+        ble_gattc_write_flat(a_conn, h_ds_cccd, on, 2, NULL, NULL);
+        state = ST_LIVE;             /* DS sub is best-effort */
+    }
+    return 0;
+}
+
+static int dsc_cb(uint16_t conn, const struct ble_gatt_error *error,
+                  uint16_t chr_val_handle,
+                  const struct ble_gatt_dsc *dsc, void *arg)
+{
+    (void)conn; (void)arg;
+    if (error->status == BLE_HS_EDONE) {
+        /* subscribe Notification Source first; Data Source after */
+        state = ST_SUB_NS;
+        uint8_t on[2] = {1, 0};
+        ble_gattc_write_flat(a_conn, h_ns_cccd, on, 2, sub_done, NULL);
+        return 0;
+    }
+    if (error->status != 0 || !dsc)
+        return 0;
+    /* 0x2902 = client characteristic configuration */
+    if (dsc->uuid.u.type == BLE_UUID_TYPE_16 &&
+        dsc->uuid.u16.value == 0x2902) {
+        if (chr_val_handle == h_ns_val)
+            h_ns_cccd = dsc->handle;
+        else if (chr_val_handle == h_ds_val)
+            h_ds_cccd = dsc->handle;
+    }
+    return 0;
+}
+
+static int chr_cb(uint16_t conn, const struct ble_gatt_error *error,
+                  const struct ble_gatt_chr *chr, void *arg)
+{
+    (void)conn; (void)arg;
+    if (error->status == BLE_HS_EDONE) {
+        if (h_ns_val && h_cp_val) {
+            state = ST_DSC;
+            ble_gattc_disc_all_dscs(a_conn, svc_start, svc_end,
+                                    dsc_cb, NULL);
+        } else {
+            state = ST_IDLE;
+        }
+        return 0;
+    }
+    if (error->status != 0 || !chr)
+        return 0;
+    if (!ble_uuid_cmp(&chr->uuid.u, &uuid_ns.u))
+        h_ns_val = chr->val_handle;
+    else if (!ble_uuid_cmp(&chr->uuid.u, &uuid_cp.u))
+        h_cp_val = chr->val_handle;
+    else if (!ble_uuid_cmp(&chr->uuid.u, &uuid_ds.u))
+        h_ds_val = chr->val_handle;
+    return 0;
+}
+
+static int svc_cb(uint16_t conn, const struct ble_gatt_error *error,
+                  const struct ble_gatt_svc *svc, void *arg)
+{
+    (void)conn; (void)arg;
+    if (error->status == BLE_HS_EDONE) {
+        /* data call already saved the bounds; launch char discovery */
+        if (svc_start) {
+            state = ST_CHR;
+            ble_gattc_disc_all_chrs(a_conn, svc_start, svc_end,
+                                    chr_cb, NULL);
+        } else {
+            state = ST_IDLE;
+        }
+        return 0;
+    }
+    if (error->status != 0 || !svc)
+        return 0;
+    svc_start = svc->start_handle;
+    svc_end = svc->end_handle;
+    return 0;
+}
+
+void ancs_on_connect(uint16_t conn)
+{
+    a_conn = conn;
+    svc_start = 0;
+    h_ns_val = h_ns_cccd = h_ds_val = h_ds_cccd = h_cp_val = 0;
+    state = ST_SVC;
+    ble_gattc_disc_svc_by_uuid(conn, &uuid_ancs.u, svc_cb, NULL);
+    disc_retry_at = hal_millis() + 12000;
+}
+
+void ancs_on_disconnect(void)
+{
+    state = ST_IDLE;
+    notif_count = 0;
+    ds_len = 0;
+    notif_dirty = 1;
+}
+
+/* the CCCD write gets bounced until iOS finishes pairing — retry */
+void ancs_on_enc_ok(void)
+{
+    if (state == ST_SUB_NS || (state == ST_LIVE && h_ns_cccd)) {
+        uint8_t on[2] = {1, 0};
+        ble_gattc_write_flat(a_conn, h_ns_cccd, on, 2, sub_done, NULL);
+    }
+}
+
+/* watchdog: if discovery stalls mid-connection, restart it once */
+void ancs_tick(void)
+{
+    if (state > ST_IDLE && state < ST_LIVE && disc_retry_at &&
+        hal_millis() > disc_retry_at) {
+        disc_retry_at = hal_millis() + 12000;
+        if (a_conn)
+            ble_gattc_disc_svc_by_uuid(a_conn, &uuid_ancs.u, svc_cb, NULL);
+    }
+}

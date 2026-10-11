@@ -27,7 +27,7 @@ LVGL_CFLAGS = $(ARCH) -std=gnu11 -O2 -g -ffunction-sections -fdata-sections \
 
 OBJS = startup.o main.o syscalls.o hal_sys.o hal_display.o lvgl_port.o \
        ui_face.o ui_nav.o sensors.o spi_flash.o \
-       nimble_port/src/ble_dfu.o \
+       nimble_port/src/ble_dfu.o nimble_port/src/ancs.o \
        gen/kenney_lvgl.o gen/assets_data.o $(LVGL_OBJS) \
        nimble_port/src/npl_baremetal.o nimble_port/src/glue.o \
        nimble_port/src/ble_app.o $(NIMBLE_OBJS)

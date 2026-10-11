@@ -130,20 +130,20 @@ overrides = {
     'BLE_STORE_MAX_BONDS': '4',
     'BLE_STORE_MAX_CCCDS': '8',
     'BLE_GATT_DISC_ALL_SVCS': '0',
-    'BLE_GATT_DISC_ALL_CHRS': '0',
-    'BLE_GATT_DISC_ALL_DSCS': '0',
-    'BLE_GATT_DISC_SVC_UUID': '0',
+    'BLE_GATT_DISC_ALL_CHRS': '1',   # ANCS client: find the 3 chars
+    'BLE_GATT_DISC_ALL_DSCS': '1',   # ANCS client: find the CCCDs
+    'BLE_GATT_DISC_SVC_UUID': '1',   # ANCS client: find the service
     'BLE_GATT_DISC_CHRS_UUID': '0',
     'BLE_GATT_FIND_INC_SVCS': '0',
     'BLE_GATT_INDICATE': '0',
     'BLE_GATT_NOTIFY_MULTIPLE': '0',
-    'BLE_GATT_READ': '0',
+    'BLE_GATT_READ': '1',
     'BLE_GATT_READ_UUID': '0',
     'BLE_GATT_READ_LONG': '0',
     'BLE_GATT_READ_MULT': '0',
     'BLE_GATT_READ_MULT_VAR': '0',
     'BLE_GATT_READ_MAX_ATTRS': '0',
-    'BLE_GATT_WRITE': '0',
+    'BLE_GATT_WRITE': '1',           # ANCS client: subscribe + actions
     'BLE_GATT_WRITE_LONG': '0',
     'BLE_GATT_WRITE_MAX_ATTRS': '0',
     'BLE_GATT_WRITE_RELIABLE': '0',
