@@ -430,7 +430,7 @@ static void hex_draw(lv_event_t *e)
     int i = (int)(intptr_t)lv_obj_get_user_data(o);
     lv_draw_line_dsc_t dsc;
     lv_draw_line_dsc_init(&dsc);
-    dsc.color = cc_state(i) ? cc_tint(i) : lv_color_hex(0x1A2230);
+    dsc.color = cc_state(i) ? cc_tint(i) : lv_color_hex(0x232B3B);
     dsc.opa = LV_OPA_COVER;
     for (int dy = -h; dy <= h; dy++) {
         int hw = r - r * (dy < 0 ? -dy : dy) / (2 * h);

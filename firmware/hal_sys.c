@@ -190,7 +190,7 @@ int hal_battery_pct(void)
     };
     static int16_t result[4];
     SAADC_ENABLE = 1;
-    SAADC_CH0_PSELP = 7;            /* AIN7 */
+    SAADC_CH0_PSELP = 8;            /* PSEL is AIN#+1: 8 = AIN7 = P0.31 */
     SAADC_CH0_PSELN = 0;
     SAADC_CH0_CONF = (3 << 16);     /* 10us acq, 1/6 gain, internal ref */
     SAADC_RESOL = 2;                /* 12 bit */
@@ -204,8 +204,8 @@ int hal_battery_pct(void)
     SAADC_ENABLE = 0;
     int raw = result[0];
     if (raw < 0) raw = 0;
-    /* raw/4096 * 3.6V * 6(gain) * 2(divider) -> millivolts */
-    uint32_t mv = (uint32_t)raw * 3600u * 12u / 4096u;
+    /* raw/4096 * 3.6V input range * 2 (the 2:1 battery divider) */
+    uint32_t mv = (uint32_t)raw * 7200u / 4096u;
     if (mv <= curve[0][0])
         return 0;
     for (int i = 1; i < 13; i++) {
