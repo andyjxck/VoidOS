@@ -29,5 +29,7 @@ extern const uint8_t icon_alpha[][24 * 24];
 #define LOGO_PX 112
 extern const uint16_t logo_rgb[LOGO_PX * LOGO_PX];
 extern const uint8_t logo_alpha[LOGO_PX * LOGO_PX];
+/* contiguous [rgb565][alpha] for LV_COLOR_FORMAT_RGB565A8 */
+extern const uint8_t logo_rgba[LOGO_PX * LOGO_PX * 3];
 
 #endif

@@ -123,6 +123,11 @@ def main():
         f.write(f"const uint8_t logo_alpha[{LOGO_PX * LOGO_PX}] = {{\n")
         emit_bytes(f, alpha)
         f.write("};\n")
+        # LV_COLOR_FORMAT_RGB565A8 expects the color map and the alpha
+        # map contiguous in ONE array: [rgb565][alpha]
+        f.write(f"const uint8_t logo_rgba[{LOGO_PX * LOGO_PX * 3}] = {{\n")
+        emit_bytes(f, bytes(rgb) + bytes(alpha))
+        f.write("};\n")
         total += len(rgb) + len(alpha)
     print(f"wrote {OUT}: ~{total // 1024} KB of asset data")
 
