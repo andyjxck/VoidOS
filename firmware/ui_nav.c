@@ -6,6 +6,7 @@
 #include "lvgl.h"
 #include "voidos/hal.h"
 #include "board.h"
+#include "assets.h"
 
 void display_backlight(int level);
 void display_sleep(int on);
@@ -2173,10 +2174,15 @@ static void rebuild(void)
 }
 
 /* Boot splash: the pinecone belongs to the bootloader; the first
-   thing OUR firmware shows is the VoidOS mark — a breathing accent
-   ring over the wordmark on black. Backlight comes up only after the
+   thing OUR firmware shows is the real VoidOS mark baked from
+   assets/ by gen_assets.py (the same logo the simulator fades in),
+   over the wordmark on black. Backlight comes up only after the
    frame is drawn, so there is never a garbage/white first frame.
+   The splash screen object is NEVER deleted — it's the persistent
+   app screen ui_init() builds on; deleting the active screen leaves
+   lv_screen_active() dangling (the 1.5.78 boot loop).
    ~1.3 s total, then the face takes over. */
+static lv_image_dsc_t splash_logo_dsc;
 void ui_splash(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
@@ -2186,24 +2192,26 @@ void ui_splash(void)
     lv_obj_set_style_border_width(scr, 0, 0);
     lv_obj_set_style_pad_all(scr, 0, 0);
 
-    lv_obj_t *ring = lv_arc_create(scr);
-    lv_obj_set_size(ring, 150, 150);
-    lv_obj_center(ring);
-    lv_arc_set_bg_angles(ring, 0, 360);
-    lv_arc_set_angles(ring, 0, 360);
-    lv_obj_set_style_arc_color(ring, lv_color_hex(0x1A2A30),
-                               LV_PART_MAIN);
-    lv_obj_set_style_arc_color(ring, C_ACCENT, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_width(ring, 3, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(ring, 3, LV_PART_INDICATOR);
-    lv_obj_remove_style(ring, NULL, LV_PART_KNOB);
-    lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+    splash_logo_dsc.header.magic   = LV_IMAGE_HEADER_MAGIC;
+    splash_logo_dsc.header.w       = LOGO_PX;
+    splash_logo_dsc.header.h       = LOGO_PX;
+    splash_logo_dsc.header.stride  = LOGO_PX * 2;
+    splash_logo_dsc.header.cf      = LV_COLOR_FORMAT_RGB565A8;
+    splash_logo_dsc.header.flags   = 0;
+    splash_logo_dsc.data_size      = LOGO_PX * LOGO_PX * 3;
+    splash_logo_dsc.data           = logo_rgba;
+    lv_obj_t *logo = lv_image_create(scr);
+    lv_image_set_src(logo, &splash_logo_dsc);
+    lv_obj_set_pos(logo, (240 - LOGO_PX) / 2, 44);
+    lv_obj_set_style_opa(logo, LV_OPA_0, 0);
 
     lv_obj_t *lbl = lv_label_create(scr);
     lv_label_set_text(lbl, "VOIDOS");
     lv_obj_set_style_text_font(lbl, &kenney16, 0);
     lv_obj_set_style_text_color(lbl, C_WHITE, 0);
-    lv_obj_center(lbl);
+    lv_obj_set_pos(lbl, 0, 170);
+    lv_obj_set_width(lbl, 240);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
 
     lv_obj_t *sub = lv_label_create(scr);
     lv_label_set_text(sub, "FOR PINETIME");
@@ -2211,21 +2219,35 @@ void ui_splash(void)
     lv_obj_set_style_text_color(sub, lv_color_hex(0x4A5566), 0);
     lv_obj_align_to(sub, lbl, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
 
+    /* logo fades in over ~600 ms like the simulator's splash */
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, logo);
+    lv_anim_set_exec_cb(&a, nav_fade_exec);   /* wraps set_style_opa */
+    lv_anim_set_values(&a, LV_OPA_0, LV_OPA_COVER);
+    lv_anim_set_duration(&a, 600);
+    lv_anim_start(&a);
+
     lv_screen_load(scr);
-    lv_timer_handler();              /* whole frame out before light */
-    /* fade in */
+    /* draw + pump the fade while the light is still off, then raise it */
     display_backlight(1);
-    hal_delay_ms(60);
+    uint32_t t0 = hal_millis();
+    while (hal_millis() - t0 < 620)
+        lv_timer_handler();
     display_backlight(2);
     hal_delay_ms(60);
     display_backlight(3);
-    hal_delay_ms(500);
+    hal_delay_ms(400);
     /* one breath: dim the panel a notch and back */
     display_backlight(2);
     hal_delay_ms(180);
     display_backlight(3);
-    hal_delay_ms(450);
-    lv_obj_delete(scr);
+    hal_delay_ms(400);
+    /* keep scr: it is the active screen ui_init() builds root on.
+       lv_obj_clean drops only the splash widgets; the screen stays
+       valid so lv_screen_active() can never dangle. */
+    lv_anim_delete(logo, NULL);      /* stop the fade before clean frees it */
+    lv_obj_clean(scr);
 }
 
 void ui_init(void)
