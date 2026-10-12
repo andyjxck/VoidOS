@@ -2182,7 +2182,8 @@ static void rebuild(void)
    app screen ui_init() builds on; deleting the active screen leaves
    lv_screen_active() dangling (the 1.5.78 boot loop).
    ~1.3 s total, then the face takes over. */
-static lv_image_dsc_t splash_logo_dsc;
+void display_send(int x0, int y0, int x1, int y1, const uint16_t *px);
+
 void ui_splash(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
@@ -2191,19 +2192,6 @@ void ui_splash(void)
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_set_style_border_width(scr, 0, 0);
     lv_obj_set_style_pad_all(scr, 0, 0);
-
-    splash_logo_dsc.header.magic   = LV_IMAGE_HEADER_MAGIC;
-    splash_logo_dsc.header.w       = LOGO_PX;
-    splash_logo_dsc.header.h       = LOGO_PX;
-    splash_logo_dsc.header.stride  = LOGO_PX * 2;
-    splash_logo_dsc.header.cf      = LV_COLOR_FORMAT_RGB565A8;
-    splash_logo_dsc.header.flags   = 0;
-    splash_logo_dsc.data_size      = LOGO_PX * LOGO_PX * 3;
-    splash_logo_dsc.data           = logo_rgba;
-    lv_obj_t *logo = lv_image_create(scr);
-    lv_image_set_src(logo, &splash_logo_dsc);
-    lv_obj_set_pos(logo, (240 - LOGO_PX) / 2, 44);
-    lv_obj_set_style_opa(logo, LV_OPA_0, 0);
 
     lv_obj_t *lbl = lv_label_create(scr);
     lv_label_set_text(lbl, "VOIDOS");
@@ -2219,25 +2207,37 @@ void ui_splash(void)
     lv_obj_set_style_text_color(sub, lv_color_hex(0x4A5566), 0);
     lv_obj_align_to(sub, lbl, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
 
-    /* logo fades in over ~600 ms like the simulator's splash */
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, logo);
-    lv_anim_set_exec_cb(&a, nav_fade_exec);   /* wraps set_style_opa */
-    lv_anim_set_values(&a, LV_OPA_0, LV_OPA_COVER);
-    lv_anim_set_duration(&a, 600);
-    lv_anim_start(&a);
-
     lv_screen_load(scr);
-    /* draw + pump the fade while the light is still off, then raise it */
+    lv_timer_handler();              /* wordmark frame out while dark */
+
+    /* the real VoidOS mark, blitted straight to the panel: alpha over
+       black, sent as raw GRAM writes. No LVGL image/decoder path —
+       nothing here can fault on an unsupported format. */
+    {
+        uint16_t line[LOGO_PX];
+        int lx = (240 - LOGO_PX) / 2;
+        for (int y = 0; y < LOGO_PX; y++) {
+            for (int x = 0; x < LOGO_PX; x++) {
+                int i = y * LOGO_PX + x;
+                unsigned a = logo_alpha[i];
+                uint16_t c = logo_rgb[i];
+                unsigned r = ((c >> 11) & 31u) * a / 255u;
+                unsigned g = ((c >> 5) & 63u) * a / 255u;
+                unsigned b = (c & 31u) * a / 255u;
+                uint16_t v = (uint16_t)((r << 11) | (g << 5) | b);
+                line[x] = (uint16_t)((v << 8) | (v >> 8)); /* panel order */
+            }
+            display_send(lx, 44 + y, lx + LOGO_PX - 1, 44 + y, line);
+        }
+    }
+
+    /* fade in */
     display_backlight(1);
-    uint32_t t0 = hal_millis();
-    while (hal_millis() - t0 < 620)
-        lv_timer_handler();
+    hal_delay_ms(60);
     display_backlight(2);
     hal_delay_ms(60);
     display_backlight(3);
-    hal_delay_ms(400);
+    hal_delay_ms(450);
     /* one breath: dim the panel a notch and back */
     display_backlight(2);
     hal_delay_ms(180);
@@ -2246,7 +2246,6 @@ void ui_splash(void)
     /* keep scr: it is the active screen ui_init() builds root on.
        lv_obj_clean drops only the splash widgets; the screen stays
        valid so lv_screen_active() can never dangle. */
-    lv_anim_delete(logo, NULL);      /* stop the fade before clean frees it */
     lv_obj_clean(scr);
 }
 
