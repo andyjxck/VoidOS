@@ -15,6 +15,9 @@
 #define DFU_WRITE_OFFSET 0x40000u
 #define DFU_MAX_SIZE     475136u
 #define DFU_MAGIC_ADDR   (DFU_WRITE_OFFSET + DFU_MAX_SIZE - 16)
+/* the last 16 slot bytes hold the swap marker, so the image itself must
+   end before it */
+#define DFU_IMG_MAX      (DFU_MAGIC_ADDR - DFU_WRITE_OFFSET)
 
 enum { ST_IDLE, ST_START, ST_INIT, ST_DATA, ST_VALIDATE, ST_VALIDATED };
 enum { OP_START = 1, OP_INIT = 2, OP_RECV_IMG = 3, OP_VALIDATE = 4,
@@ -52,6 +55,7 @@ static uint8_t dfu_buf[200];
 static unsigned buf_len, total_len, app_size;
 static uint32_t erased_to; /* pay-as-you-go erase frontier */
 static uint16_t expect_crc;
+static int init_ok;            /* dat parsed → CRC anchored */
 static uint8_t prn_every;
 static uint32_t pkt_count, bytes_rx;
 static int d_ctrl_writes, d_pkt_writes, d_notify_rc = -1;
@@ -117,13 +121,14 @@ static int dfu_packet(uint16_t conn, struct os_mbuf *om)
             break;
         app_size = (uint32_t)sz[8] | ((uint32_t)sz[9] << 8) |
                    ((uint32_t)sz[10] << 16) | ((uint32_t)sz[11] << 24);
-        if (app_size == 0 || app_size > DFU_MAX_SIZE) {
+        if (app_size == 0 || app_size > DFU_IMG_MAX) {
             const uint8_t d[3] = {OP_RESP, OP_START, 4};
             dfu_notify(conn, d, 3);
             dfu_state = ST_IDLE;
             break;
         }
         erased_to = 0;
+        init_ok = 0;
         { const uint8_t d[3] = {OP_RESP, OP_START, 1};
           dfu_notify(conn, d, 3); }
         dfu_state = ST_INIT;
@@ -141,6 +146,7 @@ static int dfu_packet(uint16_t conn, struct os_mbuf *om)
             os_mbuf_copydata(om, 10 + sd_len * 2, 2, h) != 0)
             break;
         expect_crc = h[0] | (h[1] << 8);
+        init_ok = 1;
         break;
     }
     case ST_DATA:
@@ -179,8 +185,7 @@ static int dfu_packet(uint16_t conn, struct os_mbuf *om)
            stalled waiting for it */
         if (total_len + buf_len == app_size) {
             dfu_flush();
-            if (app_size < DFU_MAX_SIZE)
-                dfu_write_magic();
+            dfu_write_magic();
             const uint8_t d[3] = {OP_RESP, OP_RECV_IMG, 1};
             dfu_notify(conn, d, 3);
             dfu_state = ST_VALIDATE;
@@ -209,9 +214,11 @@ static int dfu_control(uint16_t conn, struct os_mbuf *om)
     case OP_INIT:
         /* only init-complete (param != 0) gets a response; answering the
            init-start write can let the client send RECEIVE_IMAGE before
-           the dat file lands */
+           the dat file lands. Success requires the dat to have parsed —
+           otherwise the CRC check is unanchored and image transfer should
+           not start */
         if (dfu_state == ST_INIT && op1 != 0) {
-            const uint8_t d[3] = {OP_RESP, OP_INIT, 1};
+            const uint8_t d[3] = {OP_RESP, OP_INIT, init_ok ? 1 : 4};
             dfu_notify(conn, d, 3);
         }
         break;
@@ -239,7 +246,7 @@ static int dfu_control(uint16_t conn, struct os_mbuf *om)
         break;
     }
     case OP_RECV_IMG:
-        if (dfu_state == ST_INIT) {
+        if (dfu_state == ST_INIT && init_ok) {
             buf_len = total_len = bytes_rx = pkt_count = 0;
             dfu_state = ST_DATA;
         }

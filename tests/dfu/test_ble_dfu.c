@@ -382,6 +382,42 @@ int main(void)
     expect_notify(0x10, 0x01, 0x04, "oversize rejected");
     CHECK(dfu_state == ST_IDLE, "IDLE after oversize");
 
+    /* 3b. an image that would overlap the 16-byte swap trailer is also
+       rejected: slot - 16 + 1 = 475121 */
+    reset_dfu();
+    ble_dfu_init();
+    write_chr(h_ctrl, (const uint8_t *)"\x01\x04", 2);
+    memset(big, 0, sizeof big);
+    big[8] = 0xF1;
+    big[9] = 0x3F;
+    big[10] = 0x07;   /* 475121 */
+    write_chr(h_pkt, big, 12);
+    expect_notify(0x10, 0x01, 0x04, "trailer-overlapping size rejected");
+    CHECK(dfu_state == ST_IDLE, "IDLE after trailer-overlap");
+
+    /* 3c. slot - 16 (475120) is the largest accepted size */
+    reset_dfu();
+    ble_dfu_init();
+    write_chr(h_ctrl, (const uint8_t *)"\x01\x04", 2);
+    memset(big, 0, sizeof big);
+    big[8] = 0xF0;
+    big[9] = 0x3F;
+    big[10] = 0x07;   /* 475120 */
+    write_chr(h_pkt, big, 12);
+    expect_notify(0x10, 0x01, 0x01, "max image size accepted");
+    CHECK(dfu_state == ST_INIT, "INIT after max size");
+
+    /* 3d. init-complete before a parseable dat → error, and RECV_IMG is
+       refused until the dat lands */
+    reset_dfu();
+    ble_dfu_init();
+    write_chr(h_ctrl, (const uint8_t *)"\x01\x04", 2);
+    write_chr(h_pkt, big, 12);               /* reuse the 475120 sizes */
+    write_chr(h_ctrl, (const uint8_t *)"\x02\x01", 2);
+    expect_notify(0x10, 0x02, 0x04, "init-complete without dat rejected");
+    write_chr(h_ctrl, (const uint8_t *)"\x03", 1);
+    CHECK(dfu_state == ST_INIT, "RECV_IMG refused before dat");
+
     /* 4. short/garbage control writes don't crash or change state */
     reset_dfu();
     ble_dfu_init();
