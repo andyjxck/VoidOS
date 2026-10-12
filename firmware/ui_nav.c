@@ -11,6 +11,7 @@ void display_backlight(int level);
 void display_sleep(int on);
 void touch_sleep(int on);
 void ui_face_build(lv_obj_t *root);
+void ui_face_breath_stop(void);
 void ui_face_tick(void);
 void sensors_tick(uint32_t now);
 int sensors_bma_ok(void);
@@ -273,6 +274,11 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt,
     lv_obj_set_style_border_color(b, C_EDGE, 0);
     lv_obj_set_style_shadow_width(b, 0, 0);
     lv_obj_set_style_pad_all(b, 0, 0);
+    /* press feedback: shrink ~6% while held — reads as a physical
+       press on every real button (canvas-drawn CC/launcher tiles
+       can't scale; they have the haptic tick instead) */
+    lv_obj_set_style_transform_scale_x(b, 240, LV_STATE_PRESSED);
+    lv_obj_set_style_transform_scale_y(b, 240, LV_STATE_PRESSED);
     if (cb)
         lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = lv_label_create(b);
@@ -341,6 +347,42 @@ static int nav_sp;
 static void notif_reset_view(void);
 static uint32_t notif_sel_uid;
 
+/* ---- screen transitions ------------------------------------------------
+   Swipe direction decides which edge the new content enters from;
+   taps get a short fade. root itself slides/fades — no per-screen
+   objects, ~180 ms, so nothing re-introduces the old flashes. */
+static int pend_dir;   /* cst_dir behind the next nav_to; 0 = tap/back */
+
+static void nav_fade_exec(void *o, int32_t v)
+{
+    lv_obj_set_style_opa(o, (lv_opa_t)v, 0);
+}
+
+static void play_nav_anim(void)
+{
+    int d = pend_dir;
+    pend_dir = 0;
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, root);
+    lv_anim_set_duration(&a, 180);
+    if (d == 3 || d == 4) {              /* horizontal swipes */
+        int x0 = d == 3 ? 28 : -28;      /* enter from swipe's origin */
+        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
+        lv_anim_set_values(&a, x0, 0);
+    } else if (d) {                      /* vertical swipes */
+        int y0 = d == 1 ? -28 : 28;
+        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_y);
+        lv_anim_set_values(&a, y0, 0);
+    } else {                             /* taps: soft fade-in */
+        lv_anim_set_duration(&a, 140);
+        lv_anim_set_exec_cb(&a, nav_fade_exec);
+        lv_anim_set_values(&a, 0, LV_OPA_COVER);
+    }
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
+}
+
 static void nav_to(scr_t s)
 {
     if (cur == SCR_NOTIF && s != SCR_NOTIF)
@@ -359,6 +401,7 @@ static void nav_to(scr_t s)
     back_target = nav_sp ? nav_stack[nav_sp - 1] : SCR_FACE;
     cur = s;
     rebuild();
+    play_nav_anim();
 }
 
 static void nav_back(void)
@@ -370,6 +413,7 @@ static void nav_back(void)
         back_target = nav_sp ? nav_stack[nav_sp - 1] : SCR_FACE;
         cur = to;
         rebuild();
+        play_nav_anim();
     } else {
         nav_to(SCR_FACE);
     }
@@ -394,6 +438,7 @@ static void dir_nav(int cst_dir, int start_x)
 {
     if (water_lock)
         return;
+    pend_dir = cst_dir;        /* remembered for the slide direction */
     if (cur == SCR_FACE) {
         if (cst_dir == 1)
             nav_to(start_x < 120 ? SCR_CC : SCR_LAUNCHER);
@@ -2090,6 +2135,7 @@ static void build_diag(lv_obj_t *r)
 
 static void rebuild(void)
 {
+    ui_face_breath_stop();    /* anim on a face label must die before it */
     lv_obj_clean(root);
     lbl_time_big = NULL;
     cardio_trace = NULL;
@@ -2183,6 +2229,10 @@ void ui_init(void)
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
     /* no LV_EVENT_GESTURE or CLICKED handler: the CST816S detects
        gestures in hardware (ui_swipe) and taps never navigate */
+    /* the screen behind root must be black: slide transitions pull
+       root aside and a light default theme bg would flash */
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
     persist_load();
     apply_radio();
     /* backlight level was set by the splash / persists across sleep;
