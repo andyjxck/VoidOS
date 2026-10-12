@@ -101,6 +101,14 @@ int sensors_ppg(int i, int *out_y100);
 int hal_battery_pct(void);
 void hal_motor(int);
 
+/* short confirmation buzz for taps/selections — keeps the motor code
+   in one place so every tap feels the same */
+static void buzz(int ms)
+{
+    hal_motor(1);
+    motor_off_at = hal_millis() + ms;
+}
+
 #define PERSIST_ADDR 0x3F0000u   /* top sector, clear of the DFU region */
 struct persist {
     uint32_t magic;              /* 0x564F4944 = "VOID" */
@@ -396,13 +404,18 @@ static void dir_nav(int cst_dir, int start_x)
         else if (cst_dir == 3)
             nav_to(SCR_CARDIO);
     } else if (cur == SCR_CC || cur == SCR_LAUNCHER) {
-        if (cst_dir == 2)
+        /* up OR down exits — the swipe is hardware-detected and a
+           near-vertical flick often lands on the "wrong" one; both
+           directions mean "back to the face" here */
+        if (cst_dir == 1 || cst_dir == 2)
             nav_to(SCR_FACE);
     } else if (cur == SCR_STATS) {
-        if (cst_dir == 1)
+        if (cst_dir == 1 || cst_dir == 2)
             nav_to(SCR_FACE);
     } else if (cur == SCR_NOTIF) {
-        if (cst_dir == 3) {
+        /* every other screen uses dir 4 (L->R) as back; NOTIF alone
+           answered dir 3 — swipes looked dead on this screen only */
+        if (cst_dir == 3 || cst_dir == 4) {
             if (notif_sel_uid) {
                 notif_reset_view();
                 rebuild();
@@ -424,9 +437,10 @@ static uint32_t last_swipe_ms;
 int ui_swipe(int cst_dir, int start_x)
 {
     last_swipe_ms = hal_millis();
-    /* the honeycomb is dragged with the finger: only its exit swipe
-       (up) is a navigation gesture, everything else stays an LVGL drag */
-    if (cur == SCR_LAUNCHER && cst_dir != 2)
+    /* the honeycomb is dragged with the finger: horizontal hardware
+       gestures are the tail of a focus drag and stay drags; vertical
+       ones mean "back to the face" */
+    if (cur == SCR_LAUNCHER && cst_dir != 1 && cst_dir != 2)
         return 0;
     scr_t before = cur;
     dir_nav(cst_dir, start_x);
@@ -455,6 +469,15 @@ void ui_wake(void)
         display_sleep(0);
         touch_sleep(0);
         lv_obj_invalidate(lv_screen_active());  /* panel RAM is stale */
+        lv_timer_handler();       /* draw a fresh frame in the dark */
+        /* stepped fade-in instead of the backlight snapping on —
+           L/M/H give 4 brightness steps */
+        display_backlight(1);
+        hal_delay_ms(50);
+        if (bl_level() >= 2) {
+            display_backlight(2);
+            hal_delay_ms(50);
+        }
         display_backlight(bl_level());
     }
     last_input_ms = hal_millis();
@@ -858,9 +881,9 @@ static void cc_draw(lv_event_t *e)
                                                : lv_color_hex(0x38425A));
         int cx = cc_hexpos[i][0], cy = cc_hexpos[i][1];
         if (cc_state(t))
-            hex_fill(layer, cx, cy, 27, lv_color_mix(cc_tint(t),
+            hex_fill(layer, cx, cy, 29, lv_color_mix(cc_tint(t),
                                                      lv_color_black(), 200));
-        hex_stroke(layer, cx, cy, 28, oc, on ? 2 : 1);
+        hex_stroke(layer, cx, cy, 30, oc, on ? 2 : 1);
         char nb[12];
         if (t == -2)
             lv_snprintf(nb, sizeof nb, "%d%%", hal_battery_pct());
@@ -883,6 +906,7 @@ static void cc_draw(lv_event_t *e)
 static void cc_cb(lv_event_t *e)
 {
     if (lv_event_get_user_data(e)) {   /* brightness capsule: tap steps */
+        buzz(25);
         brightness = brightness >= 100 ? 25 : brightness + 25;
         if (!torch_on)
             display_backlight(1 + brightness * 2 / 100);
@@ -891,6 +915,7 @@ static void cc_cb(lv_event_t *e)
         return;
     }
     int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    buzz(35);                       /* haptic ack on every tile tap */
     switch (i) {
     case 0: dnd_on ^= 1; break;
     case 1:
@@ -951,8 +976,8 @@ static void build_cc(lv_obj_t *r)
         lv_obj_set_style_image_recolor(ic, cc_state(t) ? C_WHITE
                                                        : C_MUTED, 0);
         lv_obj_t *hx = lv_obj_create(r);
-        lv_obj_set_pos(hx, cc_hexpos[i][0] - 26, cc_hexpos[i][1] - 28);
-        lv_obj_set_size(hx, 52, 56);
+        lv_obj_set_pos(hx, cc_hexpos[i][0] - 28, cc_hexpos[i][1] - 30);
+        lv_obj_set_size(hx, 56, 60);
         lv_obj_set_style_bg_opa(hx, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(hx, 0, 0);
         lv_obj_set_style_pad_all(hx, 0, 0);
@@ -1035,11 +1060,11 @@ static void lc_draw(lv_event_t *e)
         int x, y, on = i == lc_focus;
         lc_pos(i, &x, &y);
         lv_color_t c = on ? lc_apps[i].col : lv_color_hex(0x38425A);
-        hex_stroke(layer, x, y, on ? 21 : 17, c, on ? 2 : 1);
-        draw_glyph(layer, lc_apps[i].glyph, x, y - 2, 7,
+        hex_stroke(layer, x, y, on ? 24 : 20, c, on ? 2 : 1);
+        draw_glyph(layer, lc_apps[i].glyph, x, y - 2, 9,
                    on ? lc_apps[i].col : lv_color_hex(0x5A6478));
         draw_txt_c(layer, &kenney9,
-                   on ? lc_apps[i].col : lv_color_hex(0x4A5566), x, y + 23,
+                   on ? lc_apps[i].col : lv_color_hex(0x4A5566), x, y + 26,
                    lc_apps[i].name);
     }
     /* hub: the focused app, big, double-stroked */
@@ -1082,6 +1107,7 @@ static void lc_event(lv_event_t *e)
             return;
         int dx = lc_press.x - 120, dy = lc_press.y - 118;
         if (dx * dx + dy * dy < 48 * 48) {
+            buzz(35);
             nav_to(lc_apps[lc_focus].scr);   /* hub tap opens focused */
             return;
         }
@@ -1090,8 +1116,9 @@ static void lc_event(lv_event_t *e)
             lc_pos(i, &x, &y);
             dx = lc_press.x - x;
             dy = lc_press.y - y;
-            if (dx * dx + dy * dy < 26 * 26) {
+            if (dx * dx + dy * dy < 30 * 30) {
                 lc_focus = i;
+                buzz(35);
                 nav_to(lc_apps[i].scr);      /* node tap opens it */
                 return;
             }
@@ -2090,6 +2117,62 @@ static void rebuild(void)
     }
 }
 
+/* Boot splash: the pinecone belongs to the bootloader; the first
+   thing OUR firmware shows is the VoidOS mark — a breathing accent
+   ring over the wordmark on black. Backlight comes up only after the
+   frame is drawn, so there is never a garbage/white first frame.
+   ~1.3 s total, then the face takes over. */
+void ui_splash(void)
+{
+    lv_obj_t *scr = lv_obj_create(NULL);
+    lv_obj_set_size(scr, 240, 240);
+    lv_obj_set_pos(scr, 0, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+    lv_obj_set_style_border_width(scr, 0, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
+
+    lv_obj_t *ring = lv_arc_create(scr);
+    lv_obj_set_size(ring, 150, 150);
+    lv_obj_center(ring);
+    lv_arc_set_bg_angles(ring, 0, 360);
+    lv_arc_set_angles(ring, 0, 360);
+    lv_obj_set_style_arc_color(ring, lv_color_hex(0x1A2A30),
+                               LV_PART_MAIN);
+    lv_obj_set_style_arc_color(ring, C_ACCENT, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(ring, 3, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(ring, 3, LV_PART_INDICATOR);
+    lv_obj_remove_style(ring, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *lbl = lv_label_create(scr);
+    lv_label_set_text(lbl, "VOIDOS");
+    lv_obj_set_style_text_font(lbl, &kenney16, 0);
+    lv_obj_set_style_text_color(lbl, C_WHITE, 0);
+    lv_obj_center(lbl);
+
+    lv_obj_t *sub = lv_label_create(scr);
+    lv_label_set_text(sub, "FOR PINETIME");
+    lv_obj_set_style_text_font(sub, &kenney9, 0);
+    lv_obj_set_style_text_color(sub, lv_color_hex(0x4A5566), 0);
+    lv_obj_align_to(sub, lbl, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
+
+    lv_screen_load(scr);
+    lv_timer_handler();              /* whole frame out before light */
+    /* fade in */
+    display_backlight(1);
+    hal_delay_ms(60);
+    display_backlight(2);
+    hal_delay_ms(60);
+    display_backlight(3);
+    hal_delay_ms(500);
+    /* one breath: dim the panel a notch and back */
+    display_backlight(2);
+    hal_delay_ms(180);
+    display_backlight(3);
+    hal_delay_ms(450);
+    lv_obj_delete(scr);
+}
+
 void ui_init(void)
 {
     root = lv_obj_create(lv_screen_active());
@@ -2102,7 +2185,9 @@ void ui_init(void)
        gestures in hardware (ui_swipe) and taps never navigate */
     persist_load();
     apply_radio();
-    display_backlight(3);
+    /* backlight level was set by the splash / persists across sleep;
+       never snap it on here */
+    display_backlight(bl_level());
     last_input_ms = hal_millis();
     nav_to(SCR_FACE);
 }
@@ -2125,6 +2210,9 @@ void ui_tick(void)
     if (!asleep && last_input_ms && now - last_input_ms > SLEEP_AFTER_MS &&
         !ble_dfu_busy()) {
         asleep = 1;
+        /* quick fade-out before the panel sleeps */
+        display_backlight(1);
+        hal_delay_ms(60);
         display_backlight(0);
         display_sleep(1);
         touch_sleep(1);
