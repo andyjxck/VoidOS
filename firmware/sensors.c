@@ -194,6 +194,20 @@ static int bpm_valid, bpm;
 static int32_t win_max, prev_win;        /* |ac| max: current/last 2 s window */
 static uint32_t win_ms;
 
+/* off-wrist power management: the LED is the expensive part, so when
+   the signal says "not on a wrist" for ~8 s the sensor is parked (0x01
+   bit7 cleared, same enable bit InfiniTime's Ppg::StopHrs toggles) and
+   woken for a 1.5 s probe every 10 s until a wrist comes back */
+static int hr_on = 1;                    /* manual switch (Settings) */
+static int hrs_parked, hrs_probing;
+static uint32_t hrs_probe_at, hrs_probe_t0;
+static unsigned offwin;                  /* ~20 Hz count of off-wrist reads */
+
+static void hrs_power(int on)
+{
+    i2c_write_reg(HRS_ADDR, 0x01, on ? (0x60 | 0x80) : 0x60);
+}
+
 /* raw PPG ring buffer for the ECG trace (50 Hz, ~2.5 s of signal) */
 #define PPG_N 128
 static int16_t ppg[PPG_N];
@@ -466,8 +480,13 @@ static void hrs_sample(uint32_t now)
     /* off-wrist: near-zero signal or a dead-flat AC window. Thresholds
        are deliberately gentle — 300/30 kept real wrists dark; a still
        arm on cold skin sits under both */
-    if (hrs < 120 || win_max < 20)
+    if (hrs < 120 || win_max < 20) {
         bpm_valid = 0;
+        if (offwin < 10000)
+            offwin++;                /* ~20 Hz: 160 ≈ 8 s off wrist */
+    } else {
+        offwin = 0;
+    }
 
     /* feed the ECG trace: clamp-filtered AC, track display range */
     int16_t v = (int16_t)(ac_f > 32700 ? 32700 : ac_f < -32700 ? -32700 : ac_f);
@@ -569,11 +588,64 @@ void sensors_tick(uint32_t now)
        render frame, which would collapse the 50 ms cadence to the
        frame rate during long redraws */
     uint32_t raw = hal_millis_raw();
-    if (hrs_ok && raw - last_hrs >= 50) {   /* 20 Hz PPG */
+    if (hrs_ok && hr_on && (!hrs_parked || hrs_probing) &&
+        raw - last_hrs >= 50) {   /* 20 Hz PPG while live or probing */
         last_hrs = raw;
         hrs_sample(raw);
     }
+    if (hrs_ok && hr_on) {
+        if (hrs_parked && !hrs_probing && raw >= hrs_probe_at) {
+            /* brief wake to look for a wrist coming back */
+            hrs_power(1);
+            hrs_probing = 1;
+            hrs_probe_t0 = raw;
+            hrs_raw = 0;
+            win_max = 0;
+            win_ms = raw;
+        } else if (hrs_probing && raw - hrs_probe_t0 >= 1500) {
+            hrs_probing = 0;
+            if (hrs_raw >= 120 && win_max >= 20) {
+                hrs_parked = 0;
+                offwin = 0;
+                dc = ac_f = 0;          /* fresh baseline after parking */
+            } else {
+                hrs_power(0);
+                hrs_probe_at = raw + 10000;
+            }
+        } else if (!hrs_parked && !hrs_probing && offwin >= 160) {
+            hrs_parked = 1;             /* ~8 s off wrist: LED off */
+            hrs_power(0);
+            hrs_probe_at = raw + 5000;
+            bpm_valid = 0;
+            bpm = 0;
+            daq_n = 0;
+            spec_reset = 1;
+        }
+    } else if (hrs_ok && !hr_on && !hrs_parked) {
+        /* manual off: park without probing — sensor stays dark until
+           the user turns it back on */
+        hrs_parked = 1;
+        hrs_probing = 0;
+        hrs_power(0);
+        bpm_valid = 0;
+        bpm = 0;
+        daq_n = 0;
+    }
 }
+
+void sensors_hr_set(int on)
+{
+    hr_on = on ? 1 : 0;
+    if (hr_on && hrs_ok) {
+        hrs_parked = hrs_probing = 0;
+        offwin = 0;
+        daq_n = 0;
+        spec_reset = 1;
+        dc = ac_f = 0;
+        hrs_power(1);
+    }
+}
+int sensors_hr_on(void) { return hr_on; }
 
 int sensors_bma_ok(void)  { return bma_ok; }
 int sensors_bma_z(void)   { return bma_ok ? az : 0; }

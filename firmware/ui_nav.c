@@ -98,6 +98,8 @@ void spi_flash_sector_erase(uint32_t);
 int sensors_steps(void);
 int sensors_wrist_raise(void);
 int sensors_raise_wake(void);
+int sensors_hr_on(void);
+void sensors_hr_set(int);
 int sensors_ppg(int i, int *out_y100);
 int hal_battery_pct(void);
 void hal_motor(int);
@@ -127,6 +129,7 @@ struct persist {
     uint16_t clock_year;
     uint8_t clock_mon, clock_day, clock_dow, clock_ok;
     uint8_t face_dig;
+    uint8_t hr_on;
 };
 static struct persist P;
 
@@ -156,7 +159,7 @@ static void persist_save(void)
 {
     persist_dirty = 0;
     P.magic = 0x564F4944u;
-    P.ver = 3;
+    P.ver = 4;
     P.brightness = (uint8_t)brightness;
     P.dnd = (uint8_t)dnd_on;
     P.airplane = (uint8_t)airplane_on;
@@ -172,6 +175,7 @@ static void persist_save(void)
     P.last_workout_sets = (uint8_t)w_last_sets;
     P.s_track = (uint8_t)s_track;
     P.face_dig = (uint8_t)face_dig;
+    P.hr_on = (uint8_t)sensors_hr_on();
     if (sensors_steps() >= 0) {      /* a dead BMA must not poison totals */
         P.steps_total = (uint32_t)ui_steps();
         P.chip_at_save = (uint32_t)sensors_steps();
@@ -195,7 +199,9 @@ static void persist_load(void)
 {
     spi_flash_init();
     spi_flash_read(PERSIST_ADDR, (uint8_t *)&P, sizeof P);
-    if (P.magic != 0x564F4944u || P.ver != 3) {
+    /* ver 3 loads fine too: same layout minus hr_on — the extra byte
+       reads as stale/0xFF and the `<= 1` guard below treats it as on */
+    if (P.magic != 0x564F4944u || (P.ver != 3 && P.ver != 4)) {
         memset(&P, 0, sizeof P);
         return;
     }
@@ -217,6 +223,8 @@ static void persist_load(void)
     w_last_sets = P.last_workout_sets;
     s_track = P.s_track;
     face_dig = P.face_dig;
+    if (P.hr_on <= 1)
+        sensors_hr_set(P.hr_on);
     /* restore the saved wall clock when nothing newer has been set
        this boot; the phone will correct it on the next sync */
     if (P.clock_ok && P.clock_year >= 2024 && !hal_clock_synced()) {
@@ -1533,16 +1541,16 @@ static void build_settings(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "SETTINGS", 1);
-    static const char *rows[11] = {
+    static const char *rows[12] = {
         "DND", "AIRPLANE", "BLUETOOTH", "TORCH", "WATER LOCK",
         "BRIGHTNESS", "CC: TORCH", "CC: WATER", "CC: PHONE",
-        "SET TIME", "FACE"
+        "SET TIME", "FACE", "HEART RATE"
     };
-    int vals[11] = {dnd_on, airplane_on, bt_on, torch_on, water_lock,
+    int vals[12] = {dnd_on, airplane_on, bt_on, torch_on, water_lock,
                     brightness, !(cc_hide & 1), !(cc_hide & 2),
-                    !(cc_hide & 4), 1, face_dig};
-    for (int i = 0; i < 11; i++) {
-        int y = 40 + i * 16;
+                    !(cc_hide & 4), 1, face_dig, sensors_hr_on()};
+    for (int i = 0; i < 12; i++) {
+        int y = 40 + i * 15;
         mk_label(r, &kenney9, C_WHITE, 18, y, rows[i]);
         char v[8];
         if (i == 5)
@@ -1653,6 +1661,7 @@ static void settings_cb(lv_event_t *e)
         nav_to(SCR_SETTIME);
         return;
     case 10: face_dig ^= 1; break;
+    case 11: sensors_hr_set(!sensors_hr_on()); break;
     }
     rebuild();
     persist_mark();
@@ -2244,6 +2253,19 @@ void ui_init(void)
 
 uint32_t button_held_ms(void);
 
+static void sleep_now(void)
+{
+    asleep = 1;
+    /* quick fade-out before the panel sleeps */
+    display_backlight(1);
+    hal_delay_ms(60);
+    display_backlight(0);
+    display_sleep(1);
+    touch_sleep(1);
+    if (persist_dirty)
+        persist_save();
+}
+
 void ui_tick(void)
 {
     uint32_t now = hal_millis();
@@ -2258,45 +2280,37 @@ void ui_tick(void)
     extern int ble_dfu_busy(void);
     /* idle -> screen off (never mid-DFU) */
     if (!asleep && last_input_ms && now - last_input_ms > SLEEP_AFTER_MS &&
-        !ble_dfu_busy()) {
-        asleep = 1;
-        /* quick fade-out before the panel sleeps */
-        display_backlight(1);
-        hal_delay_ms(60);
-        display_backlight(0);
-        display_sleep(1);
-        touch_sleep(1);
-        if (persist_dirty)
-            persist_save();
-    }
+        !ble_dfu_busy())
+        sleep_now();
     /* raise-to-wake: the reference watch detects the gesture in
        software over the accel history (mean/variance + roll angle);
        the chip's wrist-wear flag stays as a bonus trigger */
     if (asleep && (sensors_wrist_raise() || sensors_raise_wake()))
         ui_wake();
-    /* side button as nav fallback while touch is unreliable: a release
-       before the 3 s reset threshold steps through screens */
+    /* side button: one release = one action, the same everywhere —
+       off -> on · any screen -> face · face -> off. Water lock still
+       clears on the way to the face (it's the only way out with
+       touch disabled). Releases under the 3 s reset threshold only. */
     static int was_held;
     uint32_t held = button_held_ms();
     if (held)
         last_input_ms = now;
     if (was_held && !held) {
-        if (asleep)
+        if (asleep) {
             ui_wake();
-        else if (water_lock) {
-            /* the button is the way out of water lock */
+        } else if (water_lock) {
             water_lock = 0;
             hal_motor(1);
             motor_off_at = now + 120;
-            rebuild();
-        } else if (cur == SCR_FACE)
-            nav_to(SCR_LAUNCHER);
-        else if (cur == SCR_LAUNCHER)
-            nav_to(SCR_CC);
-        else if (cur == SCR_CC)
+            if (cur != SCR_FACE)
+                nav_to(SCR_FACE);
+            else
+                rebuild();
+        } else if (cur != SCR_FACE) {
             nav_to(SCR_FACE);
-        else
-            nav_back();
+        } else {
+            sleep_now();
+        }
     }
     was_held = held != 0;
     sensors_tick(now);
