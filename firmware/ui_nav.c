@@ -6,7 +6,6 @@
 #include "lvgl.h"
 #include "voidos/hal.h"
 #include "board.h"
-#include "assets.h"
 
 void display_backlight(int level);
 void display_sleep(int on);
@@ -2171,82 +2170,6 @@ static void rebuild(void)
     case SCR_CARDIO:    build_cardio(root); break;
     case SCR_DIAG:      build_diag(root); break;
     }
-}
-
-/* Boot splash: the pinecone belongs to the bootloader; the first
-   thing OUR firmware shows is the real VoidOS mark baked from
-   assets/ by gen_assets.py (the same logo the simulator fades in),
-   over the wordmark on black. Backlight comes up only after the
-   frame is drawn, so there is never a garbage/white first frame.
-   The splash screen object is NEVER deleted — it's the persistent
-   app screen ui_init() builds on; deleting the active screen leaves
-   lv_screen_active() dangling (the 1.5.78 boot loop).
-   ~1.3 s total, then the face takes over. */
-void display_send(int x0, int y0, int x1, int y1, const uint16_t *px);
-
-void ui_splash(void)
-{
-    lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_size(scr, 240, 240);
-    lv_obj_set_pos(scr, 0, 0);
-    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
-    lv_obj_set_style_border_width(scr, 0, 0);
-    lv_obj_set_style_pad_all(scr, 0, 0);
-
-    lv_obj_t *lbl = lv_label_create(scr);
-    lv_label_set_text(lbl, "VOIDOS");
-    lv_obj_set_style_text_font(lbl, &kenney16, 0);
-    lv_obj_set_style_text_color(lbl, C_WHITE, 0);
-    lv_obj_set_pos(lbl, 0, 170);
-    lv_obj_set_width(lbl, 240);
-    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-
-    lv_obj_t *sub = lv_label_create(scr);
-    lv_label_set_text(sub, "FOR PINETIME");
-    lv_obj_set_style_text_font(sub, &kenney9, 0);
-    lv_obj_set_style_text_color(sub, lv_color_hex(0x4A5566), 0);
-    lv_obj_align_to(sub, lbl, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
-
-    lv_screen_load(scr);
-    lv_timer_handler();              /* wordmark frame out while dark */
-
-    /* the real VoidOS mark, blitted straight to the panel: alpha over
-       black, sent as raw GRAM writes. No LVGL image/decoder path —
-       nothing here can fault on an unsupported format. */
-    {
-        uint16_t line[LOGO_PX];
-        int lx = (240 - LOGO_PX) / 2;
-        for (int y = 0; y < LOGO_PX; y++) {
-            for (int x = 0; x < LOGO_PX; x++) {
-                int i = y * LOGO_PX + x;
-                unsigned a = logo_alpha[i];
-                uint16_t c = logo_rgb[i];
-                unsigned r = ((c >> 11) & 31u) * a / 255u;
-                unsigned g = ((c >> 5) & 63u) * a / 255u;
-                unsigned b = (c & 31u) * a / 255u;
-                uint16_t v = (uint16_t)((r << 11) | (g << 5) | b);
-                line[x] = (uint16_t)((v << 8) | (v >> 8)); /* panel order */
-            }
-            display_send(lx, 44 + y, lx + LOGO_PX - 1, 44 + y, line);
-        }
-    }
-
-    /* fade in */
-    display_backlight(1);
-    hal_delay_ms(60);
-    display_backlight(2);
-    hal_delay_ms(60);
-    display_backlight(3);
-    hal_delay_ms(450);
-    /* one breath: dim the panel a notch and back */
-    display_backlight(2);
-    hal_delay_ms(180);
-    display_backlight(3);
-    hal_delay_ms(400);
-    /* keep scr: it is the active screen ui_init() builds root on.
-       lv_obj_clean drops only the splash widgets; the screen stays
-       valid so lv_screen_active() can never dangle. */
-    lv_obj_clean(scr);
 }
 
 void ui_init(void)
