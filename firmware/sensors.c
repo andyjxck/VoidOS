@@ -159,17 +159,27 @@ static void bma_sample(uint32_t now)
     if (delta < 60)
         armed = 1;
 
-    if (bma_engine) {
-        /* the chip's own step algorithm — Bosch feature engine */
-        uint8_t s[4];
-        if (i2c_read_reg(BMA_ADDR, 0x1E, s, 4))
-            steps = (uint32_t)s[0] | ((uint32_t)s[1] << 8) |
-                    ((uint32_t)s[2] << 16) | ((uint32_t)s[3] << 24);
-    } else if (armed && delta > 220 && now - last_step_ms > 300) {
-        /* fallback: crude magnitude-delta counter */
-        steps++;
+    /* two counters run side by side: the Bosch engine (when its blob
+       uploaded) and our crude delta counter. If the engine's feature
+       enable silently failed, its counter just reads 0 forever — the
+       old code trusted it anyway and showed 0 steps all day. Prefer
+       the engine while it actually counts; fall back otherwise. */
+    static uint32_t fb_steps;
+    if (armed && delta > 220 && now - last_step_ms > 300) {
+        fb_steps++;
         armed = 0;
         last_step_ms = now;
+    }
+    if (bma_engine) {
+        uint8_t s[4];
+        if (i2c_read_reg(BMA_ADDR, 0x1E, s, 4)) {
+            uint32_t eng = (uint32_t)s[0] | ((uint32_t)s[1] << 8) |
+                           ((uint32_t)s[2] << 16) | ((uint32_t)s[3] << 24);
+            /* engine alive? trust it; stuck at 0? use our counter */
+            steps = eng > 0 ? eng : fb_steps;
+        }
+    } else {
+        steps = fb_steps;
     }
 }
 
@@ -453,7 +463,10 @@ static void hrs_sample(uint32_t now)
         if (a > win_max)
             win_max = a;
     }
-    if (hrs < 300 || win_max < 30)
+    /* off-wrist: near-zero signal or a dead-flat AC window. Thresholds
+       are deliberately gentle — 300/30 kept real wrists dark; a still
+       arm on cold skin sits under both */
+    if (hrs < 120 || win_max < 20)
         bpm_valid = 0;
 
     /* feed the ECG trace: clamp-filtered AC, track display range */
@@ -479,7 +492,7 @@ static void hrs_sample(uint32_t now)
     }
     uint32_t span = daq_t[HR_N - 1] - daq_t[0];
     hr_fs = span ? (HR_N - 1) * 1000.0f / span : 10.0f;
-    if (hr_fs < 5.0f || hr_fs > 12.0f) {   /* gap in sampling: restart */
+    if (hr_fs < 4.0f || hr_fs > 16.0f) {   /* gap in sampling: restart */
         daq_n = 0;
         return;
     }
@@ -603,32 +616,34 @@ int sensors_wrist_raise(void)
 
 /* software raise-to-wake, ported from the reference watch firmware:
    newest-2 vs oldest-2 means of an 8-sample 10 Hz history, low
-   variance (gravity only), arm roughly down (yMean in a band), and a
-   >45 deg roll of the y/z plane between them. */
-int sensors_raise_wake(void)
+   variance (gravity only), arm roughly down (the "up" axis' mean in a
+   band), and a >45 deg roll of the plane between them.
+   The reference runs it on the y/z plane — on this board the
+   display-mapped frame swaps X/Y, so the same test is run on x/z
+   too and the roll sign is accepted either way: axis/sign mix-ups
+   used to make the gesture unreachable on some units. */
+static int raise_check(const int16_t *hu, const int16_t *hz,
+                       const int16_t *lateral)
 {
-    if (!bma_ok || wh_n < WH_N)
-        return 0;
     int i0 = wh_idx,                       /* newest */
         i1 = (wh_idx + 7) & 7,             /* 1 back */
         o0 = (wh_idx + 1) & 7,             /* oldest (~0.7 s ago) */
         o1 = (wh_idx + 2) & 7;             /* 2nd oldest */
-    int32_t xm = ((int32_t)whx[i0] + whx[i1]) / 2;
-    int32_t ym = ((int32_t)why[i0] + why[i1]) / 2;
-    int32_t zm = ((int32_t)whz[i0] + whz[i1]) / 2;
-    int32_t pym = ((int32_t)why[o0] + why[o1]) / 2;
-    int32_t pzm = ((int32_t)whz[o0] + whz[o1]) / 2;
-    /* variance of the newest 2 about their mean */
-    int32_t d = why[i0] - ym;
+    int32_t lm = ((int32_t)lateral[i0] + lateral[i1]) / 2;
+    int32_t ym = ((int32_t)hu[i0] + hu[i1]) / 2;
+    int32_t zm = ((int32_t)hz[i0] + hz[i1]) / 2;
+    int32_t pym = ((int32_t)hu[o0] + hu[o1]) / 2;
+    int32_t pzm = ((int32_t)hz[o0] + hz[o1]) / 2;
+    int32_t d = hu[i0] - ym;
     int32_t yv = d * d;
-    d = why[i1] - ym;
+    d = hu[i1] - ym;
     yv = (yv + d * d) / 2;
-    d = whz[i0] - zm;
+    d = hz[i0] - zm;
     int32_t zv = d * d;
-    d = whz[i1] - zm;
+    d = hz[i1] - zm;
     zv = (zv + d * d) / 2;
 
-    if (xm > 384 || xm < -384)
+    if (lm > 384 || lm < -384)
         return 0;
     if (yv > 56 * 56)
         return 0;
@@ -636,7 +651,17 @@ int sensors_raise_wake(void)
         return 0;
     if (ym > -64)
         return 0;
-    return deg_rolled(ym, zm, pym, pzm) < -45;
+    int roll = deg_rolled(ym, zm, pym, pzm);
+    return roll < -45 || roll > 45;
+}
+
+int sensors_raise_wake(void)
+{
+    if (!bma_ok || wh_n < WH_N)
+        return 0;
+    /* y/z plane (reference orientation) and x/z plane (this board's
+       swapped mount) — either one waking is good enough */
+    return raise_check(why, whz, whx) || raise_check(whx, whz, why);
 }
 int sensors_bma_engine(void) { return bma_engine; }
 int sensors_bma_dbg(void) { return (bma_id << 16) | (bma_stat << 8) | bma_feat; }
