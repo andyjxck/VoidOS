@@ -5,7 +5,6 @@
 #include "board.h"
 
 void lvgl_port_init(void);
-void ui_splash(void);
 void ui_init(void);
 void hal_frame_begin(void);
 void ui_tick(void);
@@ -28,10 +27,10 @@ int main(void)
     nimble_fault(0);                        /* clear stale fault record */
     hal_init();
     lvgl_port_init();
-    ui_splash();     /* first thing on the glass: VoidOS, after the
-                        bootloader's pinecone — backlight off until
-                        this frame exists */
-    ui_init();
+    ui_init();       /* no boot splash: straight to the watch face —
+                        GRAM was cleared black in display_init and the
+                        backlight comes up in ui_init just before the
+                        first face frame renders */
     ble_init();
     nimble_stage(99);                       /* 99 = init survived */
 
